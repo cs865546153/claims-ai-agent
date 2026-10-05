@@ -18,6 +18,7 @@ description: 在 Linux VPS 上搭建/维护 trojan 代理（VPN）并配 Jrohy �
  |-- 444  trojan 主代理（0.0.0.0:444, SNI=域名, fallback→127.0.0.1:80）
  |-- 22   SSH
  |-- 33609 MariaDB Docker（trojan 多用户认证，公网可达=安全风险，至少改 bind/防火墙）
+- VPS IP：`134.122.190.35`（域名 `aiwanxiang.top` 已解析到此 IP）
 ```
 
 - **trojan 认证模式**: 密码存 MySQL（`password: null`），从 `mysql.users` 表按 `sha224(密码hex)` 校验配额。
@@ -84,3 +85,13 @@ description: 在 Linux VPS 上搭建/维护 trojan 代理（VPN）并配 Jrohy �
 - trojan 与面板的 MySQL 连接会因 MariaDB 空闲超时而失效 → 改大超时并持久化到容器配置里，别只 `SET GLOBAL`（重启即丢）。
 - Windows PowerShell 里裸 `curl` 是 `Invoke-WebRequest` 别名，要用 `curl.exe`。
 - E2E 自测脚本放本地临时目录即可；改脚本后记得一次改对协议字节再跑。
+
+## 自带脚本（scripts/ 目录）
+
+| 脚本 | 用途 | 运行示例 |
+|---|---|---|
+| `scripts/check_vps.py` | 一键检查服务状态、端口、trojan 配置、nginx 配置 | `python scripts/check_vps.py` |
+| `scripts/check_certs.py` | 检查证书有效期、nginx SSL 证书同步、学习站文件、trojan-web 服务、Docker | `python scripts/check_certs.py` |
+| `scripts/check_db.py` | 检查 MariaDB 容器、trojan 用户表记录数 | `python scripts/check_db.py` |
+
+> 运行前需确保本机已装 `paramiko`：`pip install paramiko`。脚本里硬编码了 SSH 凭据（`root / Brian52026$$ @ 134.122.190.35:22`），复用时改成你的 VPS 信息即可。
