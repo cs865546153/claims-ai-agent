@@ -95,6 +95,8 @@
 
 Deep Agents隔离Python 3.12环境：`pip check`通过，官方`deepagents==0.2.8`真实调度和结构化输出测试通过。
 
+2026-10-09 Python 3.14复验（Windows）：主项目`pip check`通过，`92 passed, 1 skipped`（跳过项为需Docker的Milvus集成测试），Ruff、Mypy通过；Deep Agents隔离Python 3.14环境`deepagents==0.2.8`安装、`pip check`及`isolated_deep/tests`（2 passed）通过。
+
 FastAPI新版服务已在`127.0.0.1:8001`实际启动：`/health`、`/openapi.json`和`POST /api/claims/process`通过；合成请求进入`awaiting_information`，没有调用模型或外部业务系统。
 
 未完成真实联调：本地Qwen聊天/Embedding服务、Milvus、Redis、自托管LangFuse、核心保单/医疗/支付/通知系统、生产Docker和部署目标。缺少这些外部系统时，项目不会虚构准确率、token、延迟、成本或业务成功结果。

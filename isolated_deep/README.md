@@ -1,9 +1,9 @@
 # 官方Deep Agents隔离环境
 
-主项目LangChain 0.3与官方Deep Agents依赖范围冲突。此目录锁定真实的`deepagents==0.2.8`及其解析依赖，使用Python 3.11+，已用Python 3.12验证；不要安装进主项目虚拟环境。
+主项目LangChain 0.3与官方Deep Agents依赖范围冲突。此目录锁定真实的`deepagents==0.2.8`及其解析依赖，使用Python 3.11+，已用Python 3.14验证；不要安装进主项目虚拟环境。
 
 ```bash
-python3.12 -m venv .venv-deep
+python3.14 -m venv .venv-deep
 .venv-deep/bin/python -m pip install -r isolated_deep/requirements.txt
 .venv-deep/bin/python -m pip check
 .venv-deep/bin/python -m pytest -q isolated_deep/tests

@@ -1,6 +1,6 @@
 # 理赔 Agent 培训材料实现
 
-依据 `claims-langchain-training.md` 实现分层代码、演示、测试和部署配置。主项目保持Python 3.10+、LangChain 0.3.14、langchain-openai 0.2.14；官方Deep Agents单独安装。默认连接本地推理，百炼需显式选择。真实模式未配置业务适配器会转人工，不返回假保单或虚构定损。
+依据 `claims-langchain-training.md` 实现分层代码、演示、测试和部署配置。主项目要求Python 3.12+（当前开发与验证环境为Python 3.14）、LangChain 0.3.14、langchain-openai 0.2.14；官方Deep Agents单独安装。默认连接本地推理，百炼需显式选择。真实模式未配置业务适配器会转人工，不返回假保单或虚构定损。
 
 完整逐项映射及验证边界见 [实现验收清单](docs/implementation-matrix.md)；原文API与业务规则修正见 [差异记录](docs/material-differences.md)。
 
@@ -54,15 +54,30 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
 ## 安装和离线验证
 
-在项目根目录执行。Python 3.10兼容；本机3.10发行版会注入其他项目依赖，因此本次完整安装使用干净的Python 3.12。
+在项目根目录执行。项目要求 Python 3.12+；当前开发与验证环境为 Python 3.14（Windows 无需 C 编译器，已验证 `pytest`）。`requirements.txt` 已适配 Python 3.14，完整冻结见 `requirements-py314.lock.txt`，原 Python 3.12 锁定版本保留在 `requirements-legacy-py312.lock.txt`。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务。
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
+python3.14 -m venv .venv-py314
+source .venv-py314/bin/activate
 python -m pip install -r requirements.txt
 python -m pip check
 # 首次创建；已有.env不要覆盖。
 if [ ! -f .env ]; then cp .env.example .env; chmod 600 .env; fi
+python -m pytest -q
+python claims_agent.py --demo
+python -m demos.module04_demo --prompts
+python -m scripts.benchmark_parsers
+```
+
+Windows（PowerShell）等价命令：
+
+```powershell
+py -3.14 -m venv .venv-py314
+.\.venv-py314\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip check
+# 首次创建；已有.env不要覆盖。
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -m pytest -q
 python claims_agent.py --demo
 python -m demos.module04_demo --prompts
@@ -74,7 +89,7 @@ python -m scripts.benchmark_parsers
 ## 启动HTTP服务
 
 ```bash
-source .venv/bin/activate
+source .venv-py314/bin/activate
 uvicorn app:app --host 127.0.0.1 --port 8001
 # 另一个终端
 curl -fsS http://127.0.0.1:8001/health
@@ -101,11 +116,13 @@ python health_check.py
 
 请求支持description或claim_text，以及可选policy_id、amount。返回的是审核建议，不执行支付。SQLite检查点保存在`.data/checkpoints.sqlite`，重启可恢复。拒赔需授权人工提供条款依据；低置信度、证据不足和大额转人工。生产必须配置CLAIMS_API_KEY和REVIEWER_API_KEY；示例不支持多租户行级权限，也不能直接横向扩容。
 
-## 本地模型与可选百炼
+## 本地模型与可选云端
 
 MODEL_PROVIDER默认local，使用LOCAL_LLM_BASE_URL/API_KEY和LOCAL_FAST/MAIN/PRO/VISION_MODEL。名称必须与推理服务实际注册名一致。本地服务端口默认8000，应用端口8001。
 
-只有设置MODEL_PROVIDER=bailian才使用OPENAI_BASE_URL/API_KEY及QWEN_*_MODEL；已有百炼密钥无需删除，但不会自动用于本地模式。三个qwen别名分别映射通用、强推理、轻量模型。
+设置MODEL_PROVIDER=bailian时使用OPENAI_BASE_URL/API_KEY及QWEN_*_MODEL；已有百炼密钥无需删除，但不会自动用于本地模式。三个qwen别名分别映射通用、强推理、轻量模型。
+
+设置MODEL_PROVIDER=deepseek时使用DEEPSEEK_BASE_URL/API_KEY及DEEPSEEK_FLASH_MODEL/DEEPSEEK_PRO_MODEL；默认base_url为`https://api.deepseek.com`，flash映射通用/轻量/视觉档位，pro映射强推理档位。DeepSeek思考模式默认关闭（DEEPSEEK_THINKING=false），因为推理token计入max_tokens且会削弱确定性；需要更强推理时设为true。DeepSeek不提供embedding接口，RAG仍需单独配置EMBEDDING_*。
 
 ## 业务、RAG与记忆接入
 

@@ -44,11 +44,22 @@ def _chat(
     base_url: str | None = None,
     api_key: SecretStr | None = None,
     max_retries: int = 2,
+    thinking: bool | None = None,
 ) -> ChatOpenAI:
     """统一创建聊天模型，实例化不发起网络请求。"""
+    effective_base_url = base_url if base_url is not None else OPENAI_BASE_URL
+    model_kwargs: dict[str, object] = {"response_format": {"type": response_format}}
+    extra_body: dict[str, object] | None = None
+    # 仅对 DeepSeek 端点生效；思考模式默认关闭，可用 DEEPSEEK_THINKING=true 开启。
+    if thinking is None and settings.model_provider == 'deepseek' and effective_base_url == settings.deepseek_base_url:
+        thinking = settings.deepseek_thinking
+    if thinking is not None:
+        # provider 专属字段必须走显式 extra_body；放进 model_kwargs 会在
+        # response_format 分支调用 beta.chat.completions.parse() 时触发 TypeError。
+        extra_body = {"thinking": {"type": "enabled" if thinking else "disabled"}}
     return ChatOpenAI(
         model=model,
-        base_url=base_url if base_url is not None else OPENAI_BASE_URL,
+        base_url=effective_base_url,
         api_key=api_key if api_key is not None else OPENAI_API_KEY,
         temperature=temperature,
         top_p=top_p,
@@ -58,7 +69,8 @@ def _chat(
         presence_penalty=presence_penalty,
         # 固定种子仅尽力复现；服务端实现与模型版本也会影响结果。
         seed=seed,
-        model_kwargs={"response_format": {"type": response_format}},
+        model_kwargs=model_kwargs,
+        extra_body=extra_body,
         timeout=120.0,
         max_retries=max_retries,
     )
