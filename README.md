@@ -88,6 +88,8 @@ python -m scripts.benchmark_parsers
 
 ## 启动HTTP服务
 
+使用主项目环境 `.venv-py314`（不是 Deep Agents 的 `.venv-deep`，后者不含 FastAPI/uvicorn）。
+
 ```bash
 source .venv-py314/bin/activate
 uvicorn app:app --host 127.0.0.1 --port 8001
@@ -96,9 +98,25 @@ curl -fsS http://127.0.0.1:8001/health
 python health_check.py
 ```
 
+Windows（PowerShell）：
+
+```powershell
+.\.venv-py314\Scripts\Activate.ps1
+uvicorn app:app --host 127.0.0.1 --port 8001
+# 另一个终端；PowerShell 里 curl 是 Invoke-WebRequest 别名，需明确调用 curl.exe
+curl.exe -fsS http://127.0.0.1:8001/health
+python health_check.py
+```
+
+若不激活环境，也可直接用主环境解释器启动：
+
+```powershell
+.\.venv-py314\Scripts\uvicorn.exe app:app --host 127.0.0.1 --port 8001
+```
+
 启动后访问 `http://127.0.0.1:8001/` 使用理赔智能助手。页面采用普通对话形式，支持多轮意图识别、PDF/DOCX/文本抽取、图片视觉识别，以及结合识别结果的流式问答。点击“载入演示”可用固定合成案件运行完整状态机，查看报案、保单、三专家、置信度和决策链路；该入口不调用真实业务系统，生产环境自动禁用。分类器读取最近六条消息和上一轮意图：省略主语的追问继承当前主题，明确的新问题允许切换主题。材料审核会按附件类型核查保单信息、事故/出险证明和费用/损失凭证；缺失时保留累计附件并最多回流追问三轮，仍不完整则建议转人工，材料补齐后轮次清零并继续理赔链路。五类理赔意图进入理赔专用提示和合规约束；一般咨询交给通用基模回答。附件仅在请求内存中处理，不落盘；图片识别要求配置的模型支持 OpenAI 兼容多模态消息。
 
-也可先停止8001端口的现有本项目服务，再运行`bash scripts/verify.sh`完成启动与pytest两条验证链路。
+也可先停止8001端口的现有本项目服务，再运行`bash scripts/verify.sh`完成启动与pytest两条验证链路（`scripts/*.sh`为Bash脚本，Windows需在Git Bash或WSL中运行）。
 
 | 路由 | 行为 |
 | --- | --- |
