@@ -52,6 +52,8 @@ claims-agent-app/
 
 agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
+> 注：`My_Study/` 为个人学习测试目录，不属于本项目实现，可忽略。
+
 ## 安装和离线验证
 
 在项目根目录执行。项目要求 Python 3.12+；当前开发与验证环境为 Python 3.14（Windows 无需 C 编译器，已验证 `pytest`）。`requirements.txt` 已适配 Python 3.14，完整冻结见 `requirements-py314.lock.txt`，原 Python 3.12 锁定版本保留在 `requirements-legacy-py312.lock.txt`。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务。
