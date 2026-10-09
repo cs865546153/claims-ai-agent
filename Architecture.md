@@ -16,9 +16,10 @@
        |
        v
 【编排层】
-  链路① 对话助手(LangGraph) : classify -> policy_query / material_gate -> follow_up（回答外层流式）
-  链路② 理赔状态机(LangGraph) : intake -> policy -> 三专家 -> confidence -> decision
-  链路③ 工具Agent   : AgentExecutor + 8工具（isolated_deep，未接主 app）
+  链路① 对话助手(LangGraph)  : classify -> policy_query / material_gate -> follow_up（回答外层流式）
+  链路② 理赔状态机(LangGraph) : intake -> policy -> experts(子图) -> auto/review/investigate
+       └ experts 子图          : expert(Send 扇出三专家) -> aggregate
+  链路③ 工具/规划(未接主app)  : AgentExecutor、Plan-and-Execute、RunnableWithMessageHistory
        |
        v
 【服务层】
@@ -32,7 +33,7 @@
        |
        v
 【模型层】
-  flash（分类/轻量）· plus（通用/客服）· max（专家/强推理）· vision（单证视觉）
+  flash（分类/轻量/降级）· plus（通用/客服/主专家）· max（责任专家/强推理）· vision（单证视觉）
        |
        v
 【数据层】
@@ -83,7 +84,7 @@ stage = 'general' if intent.intent == '一般咨询' else 'claims'
 ```
 START
   -> classify（意图分类 flash 大模型 -> intent + confidence + policy_id）
-  -> 条件路由
+  -> 条件路由 route_after_classify
        |-- 一般咨询  -> END（外层流式 general 回答）
        |-- 保单查询  -> policy_query -> END（反问保单号 / 输出保单摘要）
        |-- 其他理赔  -> material_gate
@@ -111,6 +112,8 @@ ainvoke 图 -> 重放 events（trace + intent + material_status + content）-> �
 
 ## 四、链路② 理赔状态机（LangGraph，/api/claims/*）
 
+主图（`agents/claim_agent.py` 的 `build_claim_graph`），带 checkpointer：
+
 ```
 START
   -> intake（报案字段核验）
@@ -122,28 +125,50 @@ START
             -> policy（query_policy 查保单 + verify 核验）
                  |-- 查询/核验失败 -> review 转人工
                  |-- 成功
-                      -> experts（Send 扇出，并行）
-                            |-- damage    损失专家
-                            |-- risk      风险专家
-                            |-- liability 责任专家
-                      -> aggregate（置信度 = min(三专家)）
+                      -> experts（子图，见下）
                       -> route_decision（业务规则优先于模型分数）
-                            |-- 高风险                -> investigate 调查
+                            |-- 高风险(risk>.7)       -> investigate 调查
                             |-- 大额 / 低置信 / 缺证据 -> review 转人工（interrupt 挂起等 /review）
                             |-- 通过                  -> auto 受理建议（不执行付款）
   -> END
 ```
 
-## 五、大模型判断位置汇总
+**experts 子图**（`build_expert_graph`，作为主图的一个节点）
 
-| 环节 | 模型档位 | 作用 |
+```
+START
+  -> dispatch（Send 扇出，并行）
+       |-- expert(damage)     [plus/main]
+       |-- expert(risk)       [plus/main]
+       |-- expert(liability)  [max/pro]
+  -> aggregate（置信度 = min(三专家)，风险分取 risk 专家）
+  -> END
+```
+
+> 每个专家有降级兜底：主档失败回退 `flash/fast`（经 `MiddlewareChain` 的 fallback）。
+
+## 五、其他 LangGraph/LangChain 结构（`claim_agent.py`，未接主 app）
+
+| 结构 | 说明 |
+|---|---|
+| `build_plan_execute` | Plan-and-Execute 图：planner -> execute 循环（≤8 步） |
+| `create_model_plan_execute` | pro(max) 规划 + main(plus) 执行，只分析不执行 |
+| `create_basic_agent` | `AgentExecutor` + `create_tool_calling_agent`（工具调用闭环） |
+| `create_conversational_agent` | `RunnableWithMessageHistory`，按 session_id 隔离历史 |
+
+> 八类业务工具经 `tools/claim_tool.py` 的 `build_claim_tools` 注册；`isolated_deep/runtime.py`（deep agents 隔离环境）单独使用该工具集，主 app 未接入。
+
+## 六、大模型判断位置汇总
+
+| 环节 | 模型档位 | 说明 |
 |---|---|---|
 | 意图分类（入口路由） | flash | 判断用户意图 + 抽保单号 |
 | 单证识别 | vision / plus | 识别上传的发票/病历/事故单 |
-| 三专家 | max | 损失/风险/责任判断 |
+| 损失/风险专家 | plus（main） | 降级回退 flash |
+| 责任专家 | max（pro） | 降级回退 flash |
 | 回答生成 | plus | 客服/通用回答 |
 
-## 六、三处 SQLite 职责
+## 七、三处 SQLite 职责
 
 ```
 checkpoints.sqlite  <- 链路② 状态机断点/恢复（AsyncSqliteSaver）

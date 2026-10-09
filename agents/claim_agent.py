@@ -36,9 +36,11 @@ class ClaimState(TypedDict, total=False):
 
 class WorkflowServices:
     """默认真实后端，未配置查询或证据适配器则显式降级。"""
-    def __init__(self, backend: BusinessBackend | None = None) -> None:
+    def __init__(self, backend: BusinessBackend | None = None, *,
+                 clause_retriever: Callable[..., Any] | None = None) -> None:
         self.backend = backend or BusinessBackend()
         self.middleware = MiddlewareChain()
+        self.clause_retriever = clause_retriever
 
     async def policy(self, claim: dict[str, Any]) -> dict[str, Any]:
         return await asyncio.to_thread(self.backend.call, 'query_policy', policy_id=claim['policy_id'])
@@ -49,15 +51,27 @@ class WorkflowServices:
                     'reason': '教学保单不足以证明当前案件责任，需要人工核实'}
         return await asyncio.to_thread(self.backend.call, 'verify_claim_evidence', claim=claim, policy=policy)
 
+    async def _retrieve_clauses(self, claim: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
+        """检索适用条款；未配置检索器或检索失败时降级为空，不阻断判责。"""
+        if self.clause_retriever is None:
+            return []
+        try:
+            return await self.clause_retriever(claim, policy)
+        except Exception:
+            return []
+
     async def expert(self, role: str, claim: dict[str, Any], policy: dict[str, Any],
                      config: dict[str, Any]) -> dict[str, Any]:
         tier = 'pro' if role == 'liability' else 'main'
+        clauses = await self._retrieve_clauses(claim, policy)
         async def primary(data: dict[str, Any]) -> dict[str, Any]:
-            return await run_expert(ClaimLLMFactory.create(tier, max_retries=0), role, data['claim'], data['policy'], config)
+            return await run_expert(ClaimLLMFactory.create(tier, max_retries=0), role, data['claim'],
+                                    data['policy'], config, clauses=data.get('clauses'))
         async def fallback(data: dict[str, Any]) -> dict[str, Any]:
-            return await run_expert(ClaimLLMFactory.create('fast', max_retries=0), role, data['claim'], data['policy'], config)
+            return await run_expert(ClaimLLMFactory.create('fast', max_retries=0), role, data['claim'],
+                                    data['policy'], config, clauses=data.get('clauses'))
         return await self.middleware.ainvoke(str(claim.get('claim_id', config.get('configurable', {}).get('thread_id', 'unknown'))),
-            {'claim': claim, 'policy': policy}, primary,
+            {'claim': claim, 'policy': policy, 'clauses': clauses}, primary,
             model_parameters={'role': role, 'tier': tier, 'prompt_version': '1.0.0'}, fallback=fallback)
 
 

@@ -1,6 +1,7 @@
 """模块09：多格式条款加载、Milvus CRUD、混合检索与可核对引用。"""
 from collections.abc import Callable, Sequence
 from datetime import date
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -213,3 +214,29 @@ def generation_metrics(prediction: RAGAnswer, *, expected_answer: str,
     ids = set(prediction.citation_ids)
     return {'accuracy': float(prediction.answer.strip() == expected_answer.strip()),
             'citation_accuracy': len(ids & supported_citations) / len(ids) if ids else 0.}
+
+
+def build_clause_retriever(retriever: HybridRetriever, *, insurance_type: str | None = None,
+                           top_k: int = 5) -> Callable[..., Any]:
+    """构造判责链路的条款检索函数：async (claim, policy) -> list[dict]。
+
+    将报案描述与保单险种拼成检索 query；检索失败或无法构造查询时返回空列表
+    （降级为无条款），不阻断判责。返回项含 doc_id/text/chapter/source，供专家引用。
+    """
+    async def retrieve(claim: dict[str, Any], policy: dict[str, Any]) -> list[dict[str, Any]]:
+        query_parts = [
+            str(policy.get('policy_type') or ''),
+            str(claim.get('description') or claim.get('claim_text') or ''),
+            str(claim.get('accident_type') or ''),
+        ]
+        query = ' '.join(part for part in query_parts if part).strip()
+        if not query:
+            return []
+        try:
+            documents = await asyncio.to_thread(retriever.retrieve, query, top_k, insurance_type=insurance_type)
+        except Exception:
+            return []
+        return [{'doc_id': doc.metadata.get('doc_id', ''), 'text': doc.page_content,
+                 'chapter': doc.metadata.get('chapter', ''), 'source': doc.metadata.get('source', '')}
+                for doc in documents if doc.metadata.get('doc_id')]
+    return retrieve
