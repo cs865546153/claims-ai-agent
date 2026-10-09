@@ -23,7 +23,7 @@
        |
        v
 【服务层】
-  WorkflowServices（policy / verify / expert）
+  WorkflowServices（policy / verify / expert + clause_retriever 条款检索）
   MiddlewareChain（限流 -> 脱敏 -> 缓存 -> 推理 -> 审计 -> HITL）
        |
        v
@@ -146,6 +146,9 @@ START
 ```
 
 > 每个专家有降级兜底：主档失败回退 `flash/fast`（经 `MiddlewareChain` 的 fallback）。
+> 判责条款检索（RAG）：`WorkflowServices` 注入 `clause_retriever` 后，专家先检索适用条款
+> （`build_clause_retriever` -> `HybridRetriever`，向量 + BM25 加权 RRF），条款注入 prompt，
+> 专家在 `clause_ids` 中引用；引用必须落在已检索条款内，未配置或检索失败降级为无条款。
 
 ## 五、其他 LangGraph/LangChain 结构（`claim_agent.py`，未接主 app）
 

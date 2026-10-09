@@ -194,6 +194,7 @@ MODEL_PROVIDER默认local，使用LOCAL_LLM_BASE_URL/API_KEY和LOCAL_FAST/MAIN/P
 - `DemoBackend`仅提供材料里的固定教学案例。`claims_agent.py --demo`还使用明确标记的合成专家结果。未执行实际模型调用。
 - 写工具只有服务端authorize核对案件、金额、收款方等参数后才入Outbox。通知也需要审批。消费者须向下游传递相同幂等键并对账。
 - `load_documents`要求险种、版本、生效日期；`ClaimVectorStore`默认不删除旧集合。混合检索使用加权RRF，重排通过已核实的reranker函数注入。扫描PDF需另接OCR。
+- 判责条款检索（RAG）：`WorkflowServices(backend, clause_retriever=...)` 注入 `build_clause_retriever(HybridRetriever(...), insurance_type=...)` 后，三专家判责会先检索适用条款注入 prompt，专家在 `clause_ids` 中引用；引用必须落在已检索条款内，否则拒绝。未配置或检索失败自动降级为无条款，不阻断判责。
 - `ClaimContextManager`可注入Redis客户端、摘要链和实体抽取器；Qwen需注入匹配模型的token_counter，默认cl100k_base只作教学计数，首次使用需准备tiktoken缓存。
 
 ## 追踪、基础设施及部署
