@@ -62,7 +62,11 @@ def create_app(
     general_model: Any = None,
 ) -> FastAPI:
     cfg = Settings()
-    backend = DemoBackend() if cfg.business_mode == 'demo' else BusinessBackend()
+    if cfg.business_mode == 'demo':
+        from tools.policy_store import ensure_policy_store
+        backend = DemoBackend(policy_store=ensure_policy_store())
+    else:
+        backend = BusinessBackend()
     service = services or WorkflowServices(backend)
     limiter = RateLimitMiddleware()
     locks: dict[str, asyncio.Lock] = {}
@@ -325,15 +329,17 @@ def create_app(
                 classification_messages = [
                     SystemMessage(content=(
                         '你是理赔对话意图分类器。只能返回JSON对象，包含intent和confidence。'
-                        'intent只能是：理赔报案、材料审核、进度查询、条款咨询、补充材料、一般咨询。'
+                        'intent只能是：理赔报案、材料审核、进度查询、条款咨询、保单查询、补充材料、一般咨询。'
                         '必须结合最近对话、上一轮意图、当前问题和附件判断。'
                         '如果当前问题是省略主语的追问，继承最近仍在讨论的主题；'
                         '如果用户明确切换主题，以当前问题为准。不要仅因历史出现理赔词就忽略新主题。'
                         '分类边界：描述事故或询问如何发起申请属于理赔报案；'
                         '询问需要、缺少、上传或补交哪些资料属于补充材料；'
                         '要求检查已上传单证的内容、完整性或真伪属于材料审核；'
-                        '询问案件目前处理到哪里属于进度查询；询问保障责任或具体条款属于条款咨询。'
-                        '例如上一轮讨论交通事故理赔，当前问“那要准备什么”或“还缺哪些”，应分类为补充材料。'
+                        '询问案件目前处理到哪里属于进度查询；询问保障责任或具体条款属于条款咨询；'
+                        '询问某个具体保单号的状态、保额、有效期或是否有效属于保单查询。'
+                        '例如上一轮讨论交通事故理赔，当前问"那要准备什么"或"还缺哪些"，应分类为补充材料。'
+                        '当意图是保单查询时，若能从当前问题或最近对话中识别出保单号，额外输出policy_id字段（字符串），无法识别则省略该字段。'
                         '不输出解释或Markdown。'
                     )),
                     HumanMessage(content=(
@@ -401,6 +407,64 @@ def create_app(
                     observed_claim_id = body.claim_id or extracted('claimid', '案件号', '报案号', '理赔号')
                     observed_policy_id = extracted('policyid', '保单号', '保单编号')
                     observed_amount = extracted('amount', '金额', '费用合计', '索赔金额', '报案金额')
+                    if intent.intent == '保单查询':
+                        policy_id = intent.policy_id or observed_policy_id
+                        yield trace('claims', 'running', summary='保单查询',
+                                    input={'intent': intent.intent, 'policy_id': policy_id})
+                        for pre_node in ('claim_intake', 'claim_documents', 'claim_followup'):
+                            yield trace(pre_node, 'skipped', summary='保单查询仅核实保单，不执行报案与材料核查',
+                                        output={'executed': False, 'reason': 'policy_query_only'})
+                        yield trace('claim_policy', 'running', summary='查询保单实时状态',
+                                    input={'policy_id': policy_id})
+                        if not policy_id:
+                            yield trace('claim_policy', 'done', summary='缺少保单号，需用户补充',
+                                        output={'missing': ['policy_id'], 'reason': '未识别到保单号'})
+                            for waiting_node in ('claim_damage', 'claim_risk', 'claim_liability',
+                                                 'claim_confidence', 'claim_decision'):
+                                yield trace(waiting_node, 'skipped', summary='缺少保单号，暂不执行',
+                                            output={'executed': False, 'reason': 'missing_policy_id'})
+                            message = '请提供要查询的保单号，我再帮你核实保单状态与保障责任。'
+                            yield f"data: {json.dumps({'content': message}, ensure_ascii=False)}\n\n"
+                            yield trace('claims', 'done', output={'content': message, 'missing': ['policy_id']})
+                            yield f"data: {json.dumps({'done': True})}\n\n"
+                            return
+                        try:
+                            policy = await service.policy({'policy_id': policy_id})
+                        except Exception as exc:
+                            ERRORS.labels('policy_query').inc()
+                            yield trace('claim_policy', 'error', summary=f'保单查询失败：{type(exc).__name__}',
+                                        output={'error': type(exc).__name__, 'detail': str(exc), 'requires_manual_review': True})
+                            message = '保单查询暂时不可用，请转人工核实该保单。'
+                            yield f"data: {json.dumps({'content': message}, ensure_ascii=False)}\n\n"
+                            yield trace('claims', 'done', output={'content': message, 'requires_manual_review': True})
+                            yield f"data: {json.dumps({'done': True})}\n\n"
+                            return
+                        degraded = bool(policy.get('degraded'))
+                        is_demo = bool(policy.get('demo'))
+                        masked_policy = mask_pii(policy)
+                        yield trace('claim_policy', 'done',
+                                    summary=('保单查询成功（降级数据，需人工核实）' if degraded else '保单查询成功'),
+                                    input={'policy_id': policy_id}, output=masked_policy)
+                        for waiting_node in ('claim_damage', 'claim_risk', 'claim_liability',
+                                             'claim_confidence', 'claim_decision'):
+                            yield trace(waiting_node, 'skipped', summary='保单查询仅核实保单，不执行完整核赔',
+                                        output={'executed': False, 'reason': 'policy_query_only'})
+                        status = policy.get('status', '待核实')
+                        holder = policy.get('holder')
+                        coverage = policy.get('coverage')
+                        parts = [f'保单 {policy_id} 当前状态：{status}']
+                        if holder:
+                            parts.append(f'投保人：{holder}')
+                        if coverage is not None:
+                            parts.append(f'保额：{coverage}')
+                        parts.append(f'来源：{policy.get("source", "未知来源")}')
+                        note = ('（示例合成数据，非业务事实，需人工核实）' if is_demo
+                                else '（降级数据，需人工核实）' if degraded else '')
+                        content = '，'.join(parts) + '。' + note
+                        yield f"data: {json.dumps({'content': mask_pii(content)}, ensure_ascii=False)}\n\n"
+                        yield trace('claims', 'done', output={'content': content, 'policy': masked_policy})
+                        yield f"data: {json.dumps({'done': True})}\n\n"
+                        return
                     document_confidences = [
                         document.confidence for document in body.documents
                         if document.confidence is not None

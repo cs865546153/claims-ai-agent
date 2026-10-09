@@ -15,6 +15,7 @@ IntentName: TypeAlias = Literal[
     "材料审核",
     "进度查询",
     "条款咨询",
+    "保单查询",
     "补充材料",
     "一般咨询",
 ]
@@ -65,6 +66,7 @@ class IntentResult(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     intent: IntentName
     confidence: float = Field(ge=0, le=1)
+    policy_id: str | None = Field(default=None, max_length=64)
 
 
 class DemoClaimRunResponse(BaseModel):

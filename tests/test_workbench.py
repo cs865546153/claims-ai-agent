@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
 from app import create_app
+from claims_agent import DemoServices
 
 
 class FakeWorkbenchModel:
@@ -289,3 +290,64 @@ def test_general_follow_up_inherits_topic_and_explicit_question_can_switch_topic
         assert '一般咨询' in inherited.text
         assert '一般咨询' in switched.text
         assert all('通用智能助手' in prompt for prompt in model.stream_system_prompts[-2:])
+
+
+def _policy_classifier(policy_id: str | None) -> Any:
+    class PolicyClassifier(FakeWorkbenchModel):
+        async def ainvoke(self, messages: list[Any]) -> AIMessage:
+            if '意图分类器' in messages[0].content:
+                payload: dict[str, Any] = {'intent': '保单查询', 'confidence': 0.95}
+                if policy_id is not None:
+                    payload['policy_id'] = policy_id
+                return AIMessage(content=json.dumps(payload, ensure_ascii=False))
+            return await super().ainvoke(messages)
+    return PolicyClassifier()
+
+
+def test_policy_query_intent_returns_demo_policy() -> None:
+    model = _policy_classifier('POL-2024-001')
+    with TestClient(create_app(DemoServices(), database=':memory:',
+                               intent_model=model, assistant_model=model)) as client:
+        response = client.post('/api/assistant/stream', json={
+            'question': '帮我查询保单 POL-2024-001', 'documents': [], 'history': [],
+        })
+        assert response.status_code == 200
+        assert 'POL-2024-001' in response.text
+        assert '有效' in response.text
+        assert '示例合成数据' in response.text
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+        traces = [event['trace'] for event in events if 'trace' in event]
+        policy_done = next(t for t in traces if t['node'] == 'claim_policy' and t['status'] == 'done')
+        assert policy_done['input']['policy_id'] == 'POL-2024-001'
+        assert policy_done['output']['status'] == '有效'
+        assert not any('material_status' in event for event in events)
+
+
+def test_policy_query_without_policy_id_asks_user() -> None:
+    model = _policy_classifier(None)
+    with TestClient(create_app(DemoServices(), database=':memory:',
+                               intent_model=model, assistant_model=model)) as client:
+        response = client.post('/api/assistant/stream', json={
+            'question': '帮我查一下保单', 'documents': [], 'history': [],
+        })
+        assert response.status_code == 200
+        assert '请提供要查询的保单号' in response.text
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+        traces = [event['trace'] for event in events if 'trace' in event]
+        policy_done = next(t for t in traces if t['node'] == 'claim_policy' and t['status'] == 'done')
+        assert policy_done['output']['missing'] == ['policy_id']
+
+
+def test_policy_query_unknown_policy_requests_manual_review() -> None:
+    model = _policy_classifier('UNKNOWN-POLICY')
+    with TestClient(create_app(DemoServices(), database=':memory:',
+                               intent_model=model, assistant_model=model)) as client:
+        response = client.post('/api/assistant/stream', json={
+            'question': '查询保单 UNKNOWN-POLICY', 'documents': [], 'history': [],
+        })
+        assert response.status_code == 200
+        assert '人工核实' in response.text
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+        traces = [event['trace'] for event in events if 'trace' in event]
+        policy_error = next(t for t in traces if t['node'] == 'claim_policy' and t['status'] == 'error')
+        assert policy_error['output']['requires_manual_review'] is True

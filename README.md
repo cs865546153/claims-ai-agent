@@ -4,6 +4,22 @@
 
 完整逐项映射及验证边界见 [实现验收清单](docs/implementation-matrix.md)；原文API与业务规则修正见 [差异记录](docs/material-differences.md)。
 
+## ⚠️ 两个虚拟环境，先分清再动手
+
+| 提示符 | 用途 | 里面有什么 |
+| --- | --- | --- |
+| `(.venv-py314)` | **主项目**：启动 Web 服务、跑测试、调用大模型 | FastAPI、uvicorn、LangChain 0.3 全家桶 |
+| `(.venv-deep)` | 官方 Deep Agents 隔离环境 | 只有 deepagents 及其依赖，**没有 uvicorn / FastAPI** |
+
+启动服务前，先确认 PowerShell 提示符是 `(.venv-py314)`；如果不是，先切换：
+
+```powershell
+deactivate
+.\.venv-py314\Scripts\Activate.ps1
+```
+
+> 若执行 `uvicorn ...` 报「无法将 uvicorn 识别为 cmdlet」，十有八九是当前激活成了 `.venv-deep`。
+
 ## 结构与职责
 
 ```text

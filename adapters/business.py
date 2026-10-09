@@ -27,10 +27,19 @@ class DemoBackend(BusinessBackend):
     """材料固定案例仅在显式demo模式可用，未知案件不返回万能有效保单。"""
     demo = True
 
+    def __init__(self, policy_store: Any = None) -> None:
+        super().__init__()
+        self.policy_store = policy_store
+
     def call(self, action: str, **parameters: Any) -> dict[str, Any]:
         result: dict[str, Any]
         if action == 'query_policy':
-            if parameters['policy_id'] != 'POL-2024-001':
+            policy_id = parameters['policy_id']
+            if self.policy_store is not None:
+                row = self.policy_store.query(policy_id)
+                if row is not None:
+                    return dict(row, demo=True)
+            if policy_id != 'POL-2024-001':
                 raise ValueError('演示数据中没有该保单')
             result = {'policy_id': 'POL-2024-001', 'policy_type': '机动车商业险',
                       'coverage': '500000.00', 'deductible': '500.00', 'status': '有效'}
