@@ -34,6 +34,7 @@ claims-agent-app/
 ├── agents/                     # 审核编排、风险分析、置信度、记忆和中间件
 │   ├── __init__.py             # Python包声明
 │   ├── claim_agent.py          # LangGraph、Send并行、HITL、规划执行
+│   ├── assistant_agent.py      # 对话助手 LangGraph 多节点编排（方案A）
 │   ├── risk_agent.py           # 结构化专家意见与本地模型调用
 │   ├── confidence.py           # Softmax/熵/贝叶斯/融合/温度/ECE
 │   ├── memory.py               # 窗口、摘要、实体冲突与Redis持久化
@@ -48,6 +49,7 @@ claims-agent-app/
 │   ├── claim_tool.py           # 工具注册、审批绑定与并行消息闭环
 │   ├── llm_calls.py            # 同步与流式调用
 │   ├── rag_retrieval.py        # 文档加载、Milvus、混合检索及引用校验
+│   ├── policy_store.py         # 本地SQLite保单数据源（模拟数据）
 │   └── claim_write_producer.py # 幂等Outbox、重试及对账
 ├── adapters/                   # 真实接口与演示后端，未配置显式失败
 ├── prompts/                    # 四场景模板、动态规则与本地固定版本
@@ -69,6 +71,32 @@ claims-agent-app/
 agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
 > 注：`My_Study/` 为个人学习测试目录，不属于本项目实现，可忽略。
+
+## 对话助手链路的架构演进（方案 A → 方案 B）
+
+链路① 对话助手（`/api/assistant/stream`）已从手写生成器重构为 LangGraph 多节点图（`agents/assistant_agent.py`）。分两阶段推进：
+
+### 方案 A（已实现）：无状态多节点图
+
+- 图节点：`classify`（意图分类）→ 条件路由 → `policy_query` / `material_gate` → `follow_up`
+- 图负责编排决策，LLM 流式回答由外层执行器（`app.py` 的 `assistant_stream`）负责
+- 无 checkpointer，每次请求新建图，状态仍由前端回传（history / material_round）
+- 详细结构见 [Architecture.md](Architecture.md)
+
+### 方案 B（规划中）：有状态图 + 断点续跑
+
+目标：让对话助手与链路② 理赔状态机架构完全统一，具备状态持久化、断点续跑与 HITL。
+
+改造点：
+
+1. **引入 checkpointer**：给 `build_assistant_graph` 接 `AsyncSqliteSaver`（复用 `.data/checkpoints.sqlite` 或独立库），对话状态、材料轮次存后端。
+2. **材料回流改 interrupt**：当前 `material_round` 由前端回传；改为 `interrupt()` 挂起，前端从「传历史」变成 `Command(resume=...)` 恢复。
+3. **保单查询反问改 interrupt**：缺保单号时 `interrupt` 挂起等用户补保单号，而不是一次性反问结束。
+4. **恢复 token 级流式**：图内 LLM 节点改用 `graph.astream_events()`（`on_chat_model_stream`）捕获 token，替代当前「图外流式回答」，使回答也成为图节点。
+5. **前端 state 管理**：从「前端保存 history/material_round」改为「后端 checkpointer 保存，前端只传 thread_id + resume」。
+6. **测试迁移**：`FakeWorkbenchModel` 适配图流式回调，补充断点续跑用例。
+
+完成后两条链路（对话助手、理赔状态机）共用同一套 LangGraph + checkpointer + interrupt 模式。
 
 ## 安装和离线验证
 
