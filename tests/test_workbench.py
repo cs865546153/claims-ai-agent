@@ -9,6 +9,8 @@ from langchain_core.messages import AIMessage
 
 from app import create_app
 from claims_agent import DemoServices
+from adapters.business import DemoBackend
+from agents.claim_agent import WorkflowServices
 
 
 class FakeWorkbenchModel:
@@ -251,8 +253,24 @@ def test_complete_materials_exit_loop_and_call_claims_model() -> None:
         {'document_id': 'DOC-3', 'file_name': '维修报价单.pdf', 'document_type': '车辆维修报价单',
          'summary': '维修费用。', 'fields': {'维修报价': '1286.40元'}, 'confidence': 0.97, 'warnings': []},
     ]
+
+    class FakeReviewServices(WorkflowServices):
+        def __init__(self) -> None:
+            super().__init__(DemoBackend())
+
+        async def policy(self, claim: Any) -> dict[str, Any]:
+            return {'policy_id': claim['policy_id'], 'status': '有效', 'coverage': '500000.00', 'source': 'test_fixture'}
+
+        async def verify(self, claim: Any, policy: Any) -> dict[str, Any]:
+            return {'coverage_verified': True, 'exclusion_verified': False}
+
+        async def expert(self, role: str, claim: Any, policy: Any, config: Any) -> dict[str, Any]:
+            return {'expert': role, 'recommendation': 'accept', 'confidence': 0.95,
+                    'risk_score': 0.1 if role == 'risk' else None, 'clause_ids': ['clause-001'],
+                    'rationale': '测试专家意见', 'missing_information': []}
+
     with TestClient(create_app(
-        database=':memory:', assistant_model=model, intent_model=model, general_model=model,
+        FakeReviewServices(), database=':memory:', assistant_model=model, intent_model=model, general_model=model,
     )) as client:
         response = client.post('/api/assistant/stream', json={
             'question': '请审核完整材料', 'documents': complete_documents, 'history': [],
@@ -261,8 +279,9 @@ def test_complete_materials_exit_loop_and_call_claims_model() -> None:
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
         status = next(event for event in events if 'material_status' in event)
         assert status == {'material_status': 'complete', 'material_round': 0, 'missing_materials': []}
-        assert '请补充费用清单。' in response.text
-        assert '保险理赔客服助手' in model.stream_system_prompts[-1]
+        traces = [event['trace'] for event in events if 'trace' in event]
+        assert any(t['node'] == 'claim_liability' and t['status'] == 'done' and 'clause-001' in t['summary'] for t in traces)
+        assert any(t['node'] == 'claim_decision' and t['status'] == 'done' for t in traces)
 
 
 def test_general_follow_up_inherits_topic_and_explicit_question_can_switch_topic() -> None:

@@ -137,6 +137,8 @@ python -m scripts.benchmark_parsers
 使用主项目环境 `.venv-py314`（不是 Deep Agents 的 `.venv-deep`，后者不含 FastAPI/uvicorn）。
 
 ```bash
+deactivate
+.\.venv-py314\Scripts\Activate.ps1
 source .venv-py314/bin/activate
 uvicorn app:app --host 127.0.0.1 --port 8001
 # 另一个终端

@@ -62,10 +62,12 @@ def create_app(
     cfg = Settings()
     if cfg.business_mode == 'demo':
         from tools.policy_store import ensure_policy_store
+        from tools.demo_clauses import build_demo_clause_retriever
         backend = DemoBackend(policy_store=ensure_policy_store())
+        service = services or WorkflowServices(backend, clause_retriever=build_demo_clause_retriever())
     else:
         backend = BusinessBackend()
-    service = services or WorkflowServices(backend)
+        service = services or WorkflowServices(backend)
     limiter = RateLimitMiddleware()
     locks: dict[str, asyncio.Lock] = {}
 
@@ -217,6 +219,64 @@ def create_app(
         return DemoClaimRunResponse(
             claim=claim, documents=documents, result=result, trace=trace,
         )
+
+    @application.post('/api/demo/claims/process-live', response_model=DemoClaimRunResponse, tags=['本地演示'])
+    async def process_demo_claim_live() -> DemoClaimRunResponse:
+        """用内存条款 + 真实模型跑完整状态机，演示判责 RAG 检索全过程。"""
+        if cfg.app_env == 'production':
+            raise HTTPException(404, '演示接口在生产环境不可用')
+        from demos.mock_claim import build_mock_claim
+
+        claim, documents = build_mock_claim()
+        claim_data = claim.model_dump(mode='json')
+        graph = build_claim_graph(service)
+        state = await graph.ainvoke(
+            {'claim_id': claim.claim_id, 'claim_data': claim_data, 'rounds': 0, 'expert_results': []},
+            config={'configurable': {'thread_id': claim.claim_id}, 'recursion_limit': 30, 'max_concurrency': 3},
+        )
+        opinions = {item.get('expert'): item for item in state.get('expert_results', [])}
+
+        def summary(role: str) -> str:
+            opinion = opinions.get(role)
+            if not opinion:
+                return '专家结果缺失'
+            text = f"建议 {opinion.get('recommendation')} · 置信度 {opinion.get('confidence', 0):.0%}"
+            if opinion.get('clause_ids'):
+                text += f" · 引用条款 {', '.join(opinion['clause_ids'])}"
+            return text
+
+        trace = [
+            {'node': 'claim_intake', 'status': 'done', 'summary': '报案字段完整，可提交正式工作流',
+             'input': claim_data, 'output': {'phase': 'ready', 'missing_structured_fields': []}},
+            {'node': 'claim_documents', 'status': 'done', 'summary': '已核查 1 份合成单证',
+             'input': {'documents': [item.model_dump() for item in documents]},
+             'output': {'recognized_count': 1, 'average_extraction_confidence': 0.97, 'warning_count': 0}},
+            {'node': 'claim_followup', 'status': 'skipped', 'summary': '基础材料齐全，无需回流追问',
+             'input': {'round': 0}, 'output': {'complete': True}},
+            {'node': 'claim_policy', 'status': 'done', 'summary': '保单与保障责任核验完成',
+             'input': {'policy_id': claim.policy_id},
+             'output': {'policy': state.get('policy_info'), 'verification': state.get('verified')}},
+            *(
+                {'node': f'claim_{role}', 'status': 'done', 'summary': summary(role),
+                 'input': {'role': role, 'claim_id': claim.claim_id}, 'output': opinions.get(role)}
+                for role in ('damage', 'risk', 'liability')
+            ),
+            {'node': 'claim_confidence', 'status': 'done',
+             'summary': f"三专家最低置信度 {state.get('confidence', 0):.0%}",
+             'input': {'method': 'min(expert_confidence)',
+                       'expert_scores': {role: opinions[role].get('confidence') for role in opinions}},
+             'output': {'confidence': state.get('confidence'), 'risk_score': state.get('risk_score')}},
+            {'node': 'claim_decision', 'status': 'done', 'summary': '规则校验完成，形成审核建议',
+             'input': {'amount': str(claim.amount),
+                       'coverage_verified': state.get('verified', {}).get('coverage_verified'),
+                       'confidence': state.get('confidence'), 'risk_score': state.get('risk_score')},
+             'output': {'decision': state.get('decision'), 'phase': state.get('phase')}},
+        ]
+        result = ClaimResponse(
+            claim_id=claim.claim_id, decision=state.get('decision', 'review'), phase=state.get('phase', 'complete'),
+            confidence=state.get('confidence'), demo=True, message=state.get('message', ''),
+        )
+        return DemoClaimRunResponse(claim=claim, documents=documents, result=result, trace=trace)
 
     @application.post('/api/claims/process', response_model=ClaimResponse, dependencies=[Depends(authenticate)])
     async def process_claim(request: ClaimRequest) -> ClaimResponse:

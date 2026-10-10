@@ -213,17 +213,18 @@ async function sendMessage(rawQuestion) {
   }
 }
 
-async function runDemoClaim() {
+async function runDemoClaim(endpoint = "/api/demo/claims/process") {
   if (state.busy) return;
   state.busy = true;
   $("newChat").disabled = true;
   $("demoCase").disabled = true;
+  $("demoCaseLive").disabled = true;
   $("sendQuestion").disabled = true;
   resetTrace();
   $("traceStatus").textContent = "运行演示案件";
   const article = addAssistantMessage();
   try {
-    const response = await api("/api/demo/claims/process", { method: "POST" });
+    const response = await api(endpoint, { method: "POST" });
     const data = await response.json();
     state.claimId = data.claim.claim_id;
     state.documents = data.documents;
@@ -259,13 +260,15 @@ async function runDemoClaim() {
     state.busy = false;
     $("newChat").disabled = false;
     $("demoCase").disabled = false;
+    $("demoCaseLive").disabled = false;
     $("sendQuestion").disabled = false;
     scrollToBottom();
   }
 }
 
 $("attachButton").addEventListener("click", () => $("fileInput").click());
-$("demoCase").addEventListener("click", runDemoClaim);
+$("demoCase").addEventListener("click", () => runDemoClaim());
+$("demoCaseLive").addEventListener("click", () => runDemoClaim("/api/demo/claims/process-live"));
 $("fileInput").addEventListener("change", (event) => selectFiles(event.target.files));
 $("chatForm").addEventListener("submit", (event) => {
   event.preventDefault();

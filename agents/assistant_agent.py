@@ -5,6 +5,7 @@
 token 级流式输出。后续方案 B 将在此基础上引入 checkpointer + interrupt，
 实现对话断点续跑与 HITL。
 """
+import asyncio
 import json
 import operator
 import time
@@ -13,6 +14,7 @@ from typing import Annotated, Any, TypedDict
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
+from agents.claim_agent import route_decision
 from agents.middleware_audit import mask_pii
 from models.workbench import IntentResult
 from monitoring import ERRORS
@@ -74,6 +76,8 @@ class AssistantState(TypedDict, total=False):
     should_follow_up: bool
     material_check: Any
     observed_policy_id: str | None
+    observed_claim_id: str | None
+    observed_amount: str | None
     document_confidences: list[float]
     # 有序事件（trace / intent / material_status / content / done）
     events: Annotated[list[dict[str, Any]], operator.add]
@@ -291,42 +295,19 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
             return {'events': events, 'should_follow_up': True, 'material_check': material_check,
                     'observed_policy_id': observed_policy_id, 'document_confidences': document_confidences}
 
-        # 材料齐全：补齐「跳过正式核赔节点」的 trace，回答由外层流式执行。
+        # 材料齐全：进入正式核赔（三专家 + RAG 判责），不再只是客服预审。
         extra: list[dict[str, Any]] = [
             {'trace': {'node': 'claim_followup', 'status': 'skipped',
-                       'summary': ('基础材料齐全，继续理赔分析' if should_check else '当前意图无需材料门控'),
+                       'summary': ('基础材料齐全，进入正式核赔' if should_check else '当前意图无需材料门控'),
                        'input': {'intent': state['intent'], 'material_round': state['material_round']},
                        'output': {'complete': material_check.complete if should_check else None}}},
         ]
         if should_check:
             extra.append({'material_status': 'complete', 'material_round': 0, 'missing_materials': []})
-        extra.extend(
-            {'trace': {'node': node, 'status': 'skipped', 'summary': reason, 'input': node_input,
-                       'output': {'executed': False, 'reason': reason}}}
-            for node, node_input, reason in (
-                ('claim_policy', {'policy_id': observed_policy_id,
-                                  'required': [] if observed_policy_id else ['policy_id'],
-                                  'checks': ['保单状态', '保障责任', '免责条款', '证据一致性']},
-                 '聊天预审不提交正式核赔，未调用业务保单接口'),
-                ('claim_damage', {'role': 'damage', 'requires': ['verified_policy', 'claim_amount', 'documents']},
-                 '等待已核实保单与报案金额后执行损失专家'),
-                ('claim_risk', {'role': 'risk', 'requires': ['verified_policy', 'claim_history', 'documents']},
-                 '等待业务核验结果后执行风险专家'),
-                ('claim_liability', {'role': 'liability', 'requires': ['verified_policy', 'accident_evidence']},
-                 '等待事故证据核验后执行责任专家'),
-                ('claim_confidence', {'method': 'min(expert_confidence)',
-                                       'required_experts': ['damage', 'risk', 'liability'],
-                                       'observed_precheck_scores': {'intent': state['confidence'],
-                                                                    'document_extraction': document_confidences}},
-                 '三位专家尚未执行，不生成正式核赔置信度'),
-                ('claim_decision', {'rules': ['高风险转调查', '金额超过50000转人工',
-                                             '保障责任未核实转人工', '置信度不高于0.9转人工']},
-                 '正式置信度和核验结果缺失，未执行审核路由'),
-            )
-        )
         return {'events': events + extra, 'should_follow_up': False, 'material_check': material_check,
-                'observed_policy_id': observed_policy_id, 'document_confidences': document_confidences,
-                'needs_llm_answer': True}
+                'observed_policy_id': observed_policy_id, 'observed_claim_id': observed_claim_id,
+                'observed_amount': observed_amount, 'document_confidences': document_confidences,
+                'needs_llm_answer': False}
 
     async def follow_up(state: AssistantState) -> dict[str, Any]:
         events: list[dict[str, Any]] = []
@@ -363,6 +344,83 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
                                             'material_status': 'exhausted' if exhausted else 'incomplete'}}})
         return {'events': events, 'needs_llm_answer': False}
 
+    async def formal_review(state: AssistantState) -> dict[str, Any]:
+        """正式核赔：查保单、核验、三专家并行判责（含 RAG 条款检索）、决策路由。"""
+        events: list[dict[str, Any]] = []
+        claim_id = state.get('observed_claim_id') or 'chat-claim'
+        claim_data = {
+            'claim_id': claim_id,
+            'policy_id': state.get('observed_policy_id'),
+            'amount': state.get('observed_amount'),
+            'description': state['question'],
+        }
+
+        events.append({'trace': {'node': 'claim_policy', 'status': 'running',
+                                 'summary': '正式核赔：查询保单与保障责任',
+                                 'input': {'policy_id': claim_data['policy_id']}}})
+        try:
+            policy_info = await service.policy(claim_data)
+            verified = await service.verify(claim_data, policy_info)
+        except Exception as exc:
+            events.append({'trace': {'node': 'claim_policy', 'status': 'error',
+                                     'summary': f'保单核验失败：{type(exc).__name__}',
+                                     'output': {'error': type(exc).__name__, 'requires_manual_review': True}}})
+            message = '保单核验失败，请转人工核实该案件。'
+            events.append({'content': message})
+            events.append({'trace': {'node': 'claims', 'status': 'done',
+                                     'output': {'content': message, 'requires_manual_review': True}}})
+            return {'events': events, 'needs_llm_answer': False}
+        events.append({'trace': {'node': 'claim_policy', 'status': 'done',
+                                 'summary': '保单与保障责任核验完成',
+                                 'input': {'policy_id': claim_data['policy_id']},
+                                 'output': {'policy': mask_pii(policy_info), 'verification': verified}}})
+
+        config = {'configurable': {'thread_id': claim_id}}
+        roles = ('damage', 'risk', 'liability')
+        expert_results = await asyncio.gather(*[
+            service.expert(role, claim_data, policy_info, config) for role in roles
+        ])
+        opinions = {item.get('expert'): item for item in expert_results}
+        for role in roles:
+            opinion = opinions.get(role, {})
+            clause_ids = opinion.get('clause_ids') or []
+            text = f"建议 {opinion.get('recommendation')} · 置信度 {opinion.get('confidence', 0):.0%}"
+            if clause_ids:
+                text += f" · 引用条款 {', '.join(clause_ids)}"
+            events.append({'trace': {'node': f'claim_{role}', 'status': 'done', 'summary': text,
+                                     'input': {'role': role, 'claim_id': claim_id}, 'output': opinion}})
+
+        confidence = min(float(item['confidence']) for item in expert_results)
+        risk_score = next((item.get('risk_score') for item in expert_results if item.get('expert') == 'risk'), None)
+        events.append({'trace': {'node': 'claim_confidence', 'status': 'done',
+                                 'summary': f"三专家最低置信度 {confidence:.0%}",
+                                 'input': {'method': 'min(expert_confidence)',
+                                           'expert_scores': {role: opinions[role].get('confidence') for role in opinions}},
+                                 'output': {'confidence': confidence, 'risk_score': risk_score}}})
+
+        decision = route_decision({
+            'claim_data': claim_data, 'policy_info': policy_info, 'verified': verified,
+            'expert_results': expert_results, 'risk_score': risk_score, 'confidence': confidence,
+        })
+        decision_text = {'auto': '受理建议', 'review': '人工复核', 'investigate': '调查核实'}.get(decision, decision)
+        events.append({'trace': {'node': 'claim_decision', 'status': 'done',
+                                 'summary': f'审核路由：{decision_text}',
+                                 'input': {'amount': str(claim_data.get('amount') or 0),
+                                           'coverage_verified': verified.get('coverage_verified'),
+                                           'confidence': confidence, 'risk_score': risk_score},
+                                 'output': {'decision': decision, 'phase': 'complete'}}})
+
+        content = f'已完成正式核赔：三专家最低置信度 {confidence:.0%}，审核建议为「{decision_text}」。'
+        if decision == 'review':
+            content += '该案件需人工复核，未执行付款。'
+        elif decision == 'investigate':
+            content += '风险较高，建议调查核实，不能仅凭风险评分拒赔。'
+        events.append({'content': content})
+        events.append({'trace': {'node': 'claims', 'status': 'done',
+                                 'output': {'content': content, 'decision': decision}}})
+
+        return {'events': events, 'needs_llm_answer': False}
+
     def route_after_classify(state: AssistantState) -> str:
         if state['stage'] == 'general':
             return 'answer'
@@ -371,17 +429,19 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
         return 'material_gate'
 
     def route_after_gate(state: AssistantState) -> str:
-        return 'follow_up' if state.get('should_follow_up') else 'answer'
+        return 'follow_up' if state.get('should_follow_up') else 'formal_review'
 
     graph = StateGraph(AssistantState)
     graph.add_node('classify', classify)
     graph.add_node('policy_query', policy_query)
     graph.add_node('material_gate', material_gate)
     graph.add_node('follow_up', follow_up)
+    graph.add_node('formal_review', formal_review)
     graph.add_edge(START, 'classify')
     graph.add_conditional_edges('classify', route_after_classify,
                                 {'answer': END, 'policy_query': 'policy_query', 'material_gate': 'material_gate'})
     graph.add_edge('policy_query', END)
-    graph.add_conditional_edges('material_gate', route_after_gate, {'follow_up': 'follow_up', 'answer': END})
+    graph.add_conditional_edges('material_gate', route_after_gate, {'follow_up': 'follow_up', 'formal_review': 'formal_review'})
     graph.add_edge('follow_up', END)
+    graph.add_edge('formal_review', END)
     return graph.compile()
