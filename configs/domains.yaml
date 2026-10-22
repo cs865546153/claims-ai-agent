@@ -1,0 +1,111 @@
+# 领域注册表：新增领域只需在此登记意图，并实现对应的 DomainPlugin 图。
+# description_en / 意图 description_en 供 JEV 使用；JEV 是英文优先模型。
+version: 1
+domains:
+  - name: claims
+    description: 保险理赔与保单服务：报案、材料、保单、条款、进度和补充材料
+    description_en: "Insurance claims and policy services: reporting, documents, policy, clauses, progress, and supplements"
+    version: 1.0.0
+    capabilities: [policy_query, claim_workflow, rag, outbox]
+    intents:
+      - name: 理赔报案
+        description: 描述事故或询问如何发起理赔申请
+        description_en: Describe an accident or ask how to start an insurance claim
+        examples:
+          - 我的车被追尾了，怎么报案？
+          - 我想申请医疗理赔
+        risk: medium
+        mode: conversation
+      - name: 材料审核
+        description: 检查已上传单证的内容、完整性或真伪
+        description_en: Review uploaded claim documents for content, completeness, or authenticity
+        examples:
+          - 帮我看看这份发票和病历齐不齐
+        risk: medium
+        mode: conversation
+      - name: 进度查询
+        description: 询问案件当前处理到哪一步、预计何时完成
+        description_en: Ask about the current progress or expected completion time of a claim
+        examples:
+          - 我的理赔现在到哪一步了？
+        risk: low
+        mode: conversation
+      - name: 条款咨询
+        description: 询问保障责任、免责条款或具体理赔规则
+        description_en: Ask about coverage, exclusions, or specific claim rules
+        examples:
+          - 这个保险保不保自然灾害？
+        risk: low
+        mode: conversation
+      - name: 保单查询
+        description: 查询某个具体保单号的状态、保额、有效期或是否有效
+        description_en: Look up a specific policy status, coverage amount, validity, or expiry
+        examples:
+          - 帮我查一下保单 POL-2024-001 还有效吗？
+        risk: low
+        mode: conversation
+      - name: 补充材料
+        description: 询问需要、缺少、上传或补交哪些理赔资料
+        description_en: Ask which claim documents are required, missing, uploaded, or to be supplemented
+        examples:
+          - 理赔需要准备哪些材料？
+          - 还缺什么资料？
+        risk: medium
+        mode: conversation
+
+  - name: investment
+    description: 投资理财与组合管理：咨询、组合诊断、风险评估、产品查询和交易指令
+    description_en: "Investment and portfolio management: advice, portfolio diagnosis, risk assessment, product lookup, and trade instructions"
+    version: 0.1.0
+    capabilities: [market_data, portfolio, suitability, rag]
+    intents:
+      - name: 投资咨询
+        description: 询问投资方向、资产配置思路或理财建议
+        description_en: Ask for investment direction, asset allocation ideas, or wealth management advice
+        examples:
+          - 现在适合买债券基金吗？
+        risk: medium
+        mode: conversation
+      - name: 组合诊断
+        description: 分析现有持仓、组合收益或配置是否合理
+        description_en: Analyze an existing portfolio, its performance, or whether the allocation is reasonable
+        examples:
+          - 帮我看看我的基金组合怎么调整
+        risk: medium
+        mode: conversation
+      - name: 风险评估
+        description: 评估风险承受能力、风险敞口或适当性
+        description_en: Assess risk tolerance, risk exposure, or suitability
+        examples:
+          - 我的风险承受能力适合什么产品？
+        risk: medium
+        mode: conversation
+      - name: 产品查询
+        description: 查询基金、理财产品或市场产品的信息与历史表现
+        description_en: Look up a fund, wealth product, or market product and its historical performance
+        examples:
+          - 帮我查一下某只基金的历史收益
+        risk: low
+        mode: conversation
+      - name: 交易指令
+        description: 买入、卖出、赎回或转账等会改变持仓的指令
+        description_en: Buy, sell, redeem, or transfer instructions that change holdings
+        examples:
+          - 帮我把基金赎回
+        risk: high
+        mode: case
+
+  - name: general
+    description: 与理赔、投资无关的一般问题
+    description_en: General questions unrelated to insurance claims or investments
+    version: 1.0.0
+    capabilities: []
+    intents:
+      - name: 一般咨询
+        description: 与理赔、保单、投资理财无关的一般知识或日常问题
+        description_en: General knowledge or everyday questions unrelated to claims, policies, or investments
+        examples:
+          - 今天天气怎么样？
+          - Python 怎么读取 CSV？
+        risk: low
+        mode: conversation

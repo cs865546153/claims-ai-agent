@@ -1,0 +1,40 @@
+# 合成意图评测集：不包含真实个人信息。正式上线前请用真实脱敏语料扩充。
+{"id":"zh-001","lang":"zh","message":"我的车被追尾了，怎么报案？","domain":"claims","intent":"理赔报案"}
+{"id":"zh-002","lang":"zh","message":"我想申请医疗理赔","domain":"claims","intent":"理赔报案"}
+{"id":"zh-003","lang":"zh","message":"理赔需要准备哪些材料？","domain":"claims","intent":"补充材料"}
+{"id":"zh-004","lang":"zh","message":"还缺什么资料？","domain":"claims","intent":"补充材料"}
+{"id":"zh-005","lang":"zh","message":"帮我看看这份发票和病历齐不齐","domain":"claims","intent":"材料审核"}
+{"id":"zh-006","lang":"zh","message":"我上传的诊断证明有没有问题","domain":"claims","intent":"材料审核"}
+{"id":"zh-007","lang":"zh","message":"我的理赔现在到哪一步了？","domain":"claims","intent":"进度查询"}
+{"id":"zh-008","lang":"zh","message":"案件什么时候能审核完","domain":"claims","intent":"进度查询"}
+{"id":"zh-009","lang":"zh","message":"这个保险保不保自然灾害？","domain":"claims","intent":"条款咨询"}
+{"id":"zh-010","lang":"zh","message":"免责条款里哪些情况不赔","domain":"claims","intent":"条款咨询"}
+{"id":"zh-011","lang":"zh","message":"帮我查一下保单 POL-2024-001 还有效吗？","domain":"claims","intent":"保单查询"}
+{"id":"zh-012","lang":"zh","message":"我的保单保额是多少","domain":"claims","intent":"保单查询"}
+{"id":"zh-013","lang":"zh","message":"交通事故责任怎么划分","domain":"claims","intent":"条款咨询"}
+{"id":"zh-014","lang":"zh","message":"对方全责我需要垫付吗","domain":"claims","intent":"条款咨询"}
+{"id":"zh-015","lang":"zh","message":"基金组合怎么配置","domain":"investment","intent":"组合诊断"}
+{"id":"zh-016","lang":"zh","message":"帮我看看我的持仓风险","domain":"investment","intent":"组合诊断"}
+{"id":"zh-017","lang":"zh","message":"现在适合买债券基金吗","domain":"investment","intent":"投资咨询"}
+{"id":"zh-018","lang":"zh","message":"我有 10 万闲钱怎么理财","domain":"investment","intent":"投资咨询"}
+{"id":"zh-019","lang":"zh","message":"我的风险承受能力适合什么产品","domain":"investment","intent":"风险评估"}
+{"id":"zh-020","lang":"zh","message":"帮我查一下某只基金的历史收益","domain":"investment","intent":"产品查询"}
+{"id":"zh-021","lang":"zh","message":"我想把基金赎回","domain":"investment","intent":"交易指令"}
+{"id":"zh-022","lang":"zh","message":"帮我下单买入 1000 份","domain":"investment","intent":"交易指令"}
+{"id":"zh-023","lang":"zh","message":"今天天气怎么样？","domain":"general","intent":"一般咨询"}
+{"id":"zh-024","lang":"zh","message":"帮我写一封请假邮件","domain":"general","intent":"一般咨询"}
+{"id":"zh-025","lang":"zh","message":"Python 怎么读取 CSV","domain":"general","intent":"一般咨询"}
+{"id":"zh-026","lang":"zh","message":"那要准备什么材料？","domain":"claims","intent":"补充材料","history":[{"role":"user","content":"我的车被追尾了"},{"role":"assistant","content":"请描述事故经过"}]}
+{"id":"zh-027","lang":"zh","message":"那怎么配置？","domain":"investment","intent":"组合诊断","history":[{"role":"user","content":"我想咨询基金"},{"role":"assistant","content":"请提供你的持仓"}]}
+{"id":"zh-028","lang":"zh","message":"那保额呢？","domain":"claims","intent":"保单查询","history":[{"role":"user","content":"帮我查保单 POL-2024-001"},{"role":"assistant","content":"已查询到该保单"}]}
+{"id":"zh-029","lang":"zh","message":"大概还要多久？","domain":"claims","intent":"进度查询","history":[{"role":"user","content":"我的理赔进度"},{"role":"assistant","content":"正在审核中"}]}
+{"id":"zh-030","lang":"zh","message":"我想问一下理赔的事情","domain":"claims","intent":"理赔报案"}
+{"id":"en-001","lang":"en","message":"My car was rear-ended, how do I file a claim?","domain":"claims","intent":"理赔报案"}
+{"id":"en-002","lang":"en","message":"What documents are missing for my claim?","domain":"claims","intent":"补充材料"}
+{"id":"en-003","lang":"en","message":"Where is my claim now?","domain":"claims","intent":"进度查询"}
+{"id":"en-004","lang":"en","message":"Does my policy cover flood damage?","domain":"claims","intent":"条款咨询"}
+{"id":"en-005","lang":"en","message":"How should I allocate my fund portfolio?","domain":"investment","intent":"组合诊断"}
+{"id":"en-006","lang":"en","message":"Is now a good time to buy bond funds?","domain":"investment","intent":"投资咨询"}
+{"id":"en-007","lang":"en","message":"What is my risk tolerance?","domain":"investment","intent":"风险评估"}
+{"id":"en-008","lang":"en","message":"Please redeem my fund shares.","domain":"investment","intent":"交易指令"}
+{"id":"en-009","lang":"en","message":"What is the weather like today?","domain":"general","intent":"一般咨询"}

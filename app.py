@@ -16,10 +16,27 @@ from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, Field
 
 from adapters.business import BusinessBackend, DemoBackend
+from adapters.investment import DemoInvestmentBackend, InvestmentBackend
 from agents.claim_agent import WorkflowServices, build_claim_graph
+from agents.investment_agent import (
+    InvestmentServices,
+    build_demo_trace,
+    build_investment_graph,
+    investment_advice_from_state,
+    investment_initial_state,
+    investment_state_to_response,
+    run_demo_investment,
+)
 from agents.middleware_audit import configure_logging, mask_pii, RateLimitMiddleware
 from agents.observability import tracing_config
 from config import ClaimLLMFactory, get_model
+from models.investment import (
+    DemoInvestmentRunResponse,
+    InvestmentConfirmation,
+    InvestmentRequest,
+    InvestmentResponse,
+    InvestmentReviewInput,
+)
 from models.schemas import ClaimRequest, ClaimResponse
 from models.workbench import AssistantRequest, DemoClaimRunResponse, DocumentBatchResponse
 from monitoring import metrics, REQUESTS, ERRORS, LATENCY, CONFIDENCE, ITERATIONS, TOKENS
@@ -58,6 +75,8 @@ def create_app(
     assistant_model: Any = None,
     intent_model: Any = None,
     general_model: Any = None,
+    investment_model: Any = None,
+    investment_services: InvestmentServices | None = None,
 ) -> FastAPI:
     cfg = Settings()
     if cfg.business_mode == 'demo':
@@ -68,6 +87,9 @@ def create_app(
     else:
         backend = BusinessBackend()
         service = services or WorkflowServices(backend)
+    investment_service = investment_services or InvestmentServices(
+        DemoInvestmentBackend() if cfg.business_mode == 'demo' else InvestmentBackend()
+    )
     limiter = RateLimitMiddleware()
     locks: dict[str, asyncio.Lock] = {}
 
@@ -83,6 +105,7 @@ def create_app(
         async with AsyncSqliteSaver.from_conn_string(path) as saver:
             await saver.setup()
             application.state.graph = build_claim_graph(service, saver)
+            application.state.investment_graph = build_investment_graph(investment_service, saver)
             yield
 
     application = FastAPI(title='理赔 Agent 服务', version='0.3.0', lifespan=lifespan)
@@ -108,6 +131,39 @@ def create_app(
 
     def graph_config(claim_id: str) -> dict[str, Any]:
         return {'configurable': {'thread_id': claim_id}}
+
+    def investment_graph_config(request_id: str) -> dict[str, Any]:
+        return {'configurable': {'thread_id': f'investment:{request_id}'}, 'recursion_limit': 30}
+
+    def interrupt_value(snapshot: Any) -> dict[str, Any] | None:
+        """兼容 StateSnapshot 与 ainvoke 返回值中的 interrupt 表达。"""
+        if isinstance(snapshot, dict):
+            for item in snapshot.get('__interrupt__') or ():
+                value = getattr(item, 'value', item)
+                if isinstance(value, dict):
+                    return value
+        for task in getattr(snapshot, 'tasks', ()) or ():
+            for item in getattr(task, 'interrupts', ()) or ():
+                value = getattr(item, 'value', None)
+                if isinstance(value, dict):
+                    return value
+        return None
+
+    def interrupt_kind(snapshot: Any) -> str | None:
+        value = interrupt_value(snapshot)
+        return str(value.get('kind')) if value else None
+
+    def investment_request_from_state(state: dict[str, Any]) -> InvestmentRequest:
+        return InvestmentRequest(
+            request_id=state['request_id'],
+            question=state.get('question') or '投资请求',
+            intent=state.get('intent') or '投资咨询',
+            risk_profile=state.get('risk_profile'),
+            portfolio_id=state.get('portfolio_id'),
+            product_id=state.get('product_id'),
+            amount=state.get('amount'),
+            confirmed=bool(state.get('confirmed')),
+        )
 
     async def status(claim_id: str) -> ClaimResponse:
         snapshot = await application.state.graph.aget_state(graph_config(claim_id))
@@ -278,6 +334,77 @@ def create_app(
         )
         return DemoClaimRunResponse(claim=claim, documents=documents, result=result, trace=trace)
 
+    @application.post('/api/demo/investment/process', response_model=DemoInvestmentRunResponse, tags=['本地演示'])
+    async def process_demo_investment() -> DemoInvestmentRunResponse:
+        """使用固定合成组合运行投资域图，不连接券商、不执行真实下单。"""
+        if cfg.app_env == 'production':
+            raise HTTPException(404, '演示接口在生产环境不可用')
+        request, state, result = await run_demo_investment()
+        return DemoInvestmentRunResponse(
+            request=request,
+            result=result,
+            advice=investment_advice_from_state(state),
+            trace=build_demo_trace(state, request),
+        )
+
+    @application.post('/api/investment/process', response_model=InvestmentResponse,
+                      dependencies=[Depends(authenticate)], tags=['投资域'])
+    async def process_investment(request: InvestmentRequest) -> InvestmentResponse:
+        """投资咨询直接形成建议；交易指令在二次确认前暂停，不执行下单。"""
+        async with locks.setdefault(f'investment:{request.request_id}', asyncio.Lock()):
+            config = investment_graph_config(request.request_id)
+            snapshot = await application.state.investment_graph.aget_state(config)
+            if snapshot.values:
+                return investment_state_to_response(
+                    snapshot.values, request, interrupted=interrupt_kind(snapshot)
+                )
+            state = await application.state.investment_graph.ainvoke(
+                investment_initial_state(request), config=config
+            )
+            return investment_state_to_response(
+                state, request, interrupted=interrupt_kind(state)
+            )
+
+    @application.post('/api/investment/{request_id}/confirm', response_model=InvestmentResponse,
+                      dependencies=[Depends(authenticate)], tags=['投资域'])
+    async def confirm_investment(request_id: str, body: InvestmentConfirmation) -> InvestmentResponse:
+        """二次确认交易指令；确认后进入人工审批，仍未下单。"""
+        async with locks.setdefault(f'investment:{request_id}', asyncio.Lock()):
+            config = investment_graph_config(request_id)
+            snapshot = await application.state.investment_graph.aget_state(config)
+            if not snapshot.values:
+                raise HTTPException(404, '未找到投资请求')
+            request = investment_request_from_state(snapshot.values)
+            if interrupt_kind(snapshot) != 'trade_confirmation':
+                raise HTTPException(409, '当前请求不处于交易二次确认阶段')
+            state = await application.state.investment_graph.ainvoke(
+                Command(resume=body.model_dump()), config=config
+            )
+            return investment_state_to_response(
+                state, request, interrupted=interrupt_kind(state)
+            )
+
+    @application.post('/api/investment/{request_id}/review', response_model=InvestmentResponse,
+                      dependencies=[Depends(authenticate), Depends(authenticate_reviewer)], tags=['投资域'])
+    async def review_investment(request_id: str, body: InvestmentReviewInput) -> InvestmentResponse:
+        """人工审批交易指令；只有 approve 且适配器实际执行时才标记 executed。"""
+        if body.decision == 'reject' and not body.reason:
+            raise HTTPException(422, '拒绝交易必须记录理由')
+        async with locks.setdefault(f'investment:{request_id}', asyncio.Lock()):
+            config = investment_graph_config(request_id)
+            snapshot = await application.state.investment_graph.aget_state(config)
+            if not snapshot.values:
+                raise HTTPException(404, '未找到投资请求')
+            request = investment_request_from_state(snapshot.values)
+            if interrupt_kind(snapshot) != 'investment_review':
+                raise HTTPException(409, '当前请求不处于人工审批阶段')
+            state = await application.state.investment_graph.ainvoke(
+                Command(resume=mask_pii(body.model_dump())), config=config
+            )
+            return investment_state_to_response(
+                state, request, interrupted=interrupt_kind(state)
+            )
+
     @application.post('/api/claims/process', response_model=ClaimResponse, dependencies=[Depends(authenticate)])
     async def process_claim(request: ClaimRequest) -> ClaimResponse:
         async with locks.setdefault(request.claim_id, asyncio.Lock()):
@@ -345,7 +472,7 @@ def create_app(
 
     @application.post('/api/assistant/stream', dependencies=[Depends(authenticate)], tags=['工作台'])
     async def assistant_stream(body: AssistantRequest) -> StreamingResponse:
-        """识别意图后，将理赔问题和一般问题路由到对应模型提示（LangGraph 多节点编排）。"""
+        """识别意图后，将理赔、投资和一般问题路由到对应模型提示（LangGraph 多节点编排）。"""
         from agents.assistant_agent import build_assistant_graph, chat_content
 
         context = json.dumps(
@@ -357,6 +484,9 @@ def create_app(
             'main', temperature=0.6, max_tokens=1500, response_format='text', stop=()
         )
         effective_assistant = assistant_model or get_model('customer_service')
+        effective_investment = investment_model or ClaimLLMFactory.create(
+            'main', temperature=0.4, max_tokens=1800, response_format='text', stop=()
+        )
 
         def model_inputs(model: Any, messages: list[Any]) -> dict[str, Any]:
             return {
@@ -378,6 +508,7 @@ def create_app(
                     classifier=classifier,
                     general_model=effective_general,
                     assistant_model=effective_assistant,
+                    investment_model=effective_investment,
                     service=service,
                 )
                 state = await graph.ainvoke({

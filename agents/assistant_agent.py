@@ -18,11 +18,13 @@ from agents.claim_agent import route_decision
 from agents.middleware_audit import mask_pii
 from models.workbench import IntentResult
 from monitoring import ERRORS
+from prompts.investment_prompt import INVESTMENT_ADVISOR_PROMPT
 from tools.material_check import check_claim_materials
 
 INTENT_PROMPT = (
-    '你是理赔对话意图分类器。只能返回JSON对象，包含intent和confidence。'
-    'intent只能是：理赔报案、材料审核、进度查询、条款咨询、保单查询、补充材料、一般咨询。'
+    '你是理赔与投资对话意图分类器。只能返回JSON对象，包含intent和confidence。'
+    'intent只能是：理赔报案、材料审核、进度查询、条款咨询、保单查询、补充材料、'
+    '投资咨询、组合诊断、风险评估、产品查询、交易指令、一般咨询。'
     '必须结合最近对话、上一轮意图、当前问题和附件判断。'
     '如果当前问题是省略主语的追问，继承最近仍在讨论的主题；'
     '如果用户明确切换主题，以当前问题为准。不要仅因历史出现理赔词就忽略新主题。'
@@ -31,10 +33,17 @@ INTENT_PROMPT = (
     '要求检查已上传单证的内容、完整性或真伪属于材料审核；'
     '询问案件目前处理到哪里属于进度查询；询问保障责任或具体条款属于条款咨询；'
     '询问某个具体保单号的状态、保额、有效期或是否有效属于保单查询。'
+    '投资边界：询问投资方向、资产配置思路或理财建议属于投资咨询；'
+    '分析现有持仓、组合收益或配置是否合理属于组合诊断；'
+    '评估风险承受能力、风险敞口或适当性属于风险评估；'
+    '查询基金、理财产品或市场产品的信息与历史表现属于产品查询；'
+    '买入、卖出、赎回或转账等会改变持仓的指令属于交易指令。'
     '例如上一轮讨论交通事故理赔，当前问"那要准备什么"或"还缺哪些"，应分类为补充材料。'
     '当意图是保单查询时，若能从当前问题或最近对话中识别出保单号，额外输出policy_id字段（字符串），无法识别则省略该字段。'
     '不输出解释或Markdown。'
 )
+
+INVESTMENT_INTENTS = frozenset({'投资咨询', '组合诊断', '风险评估', '产品查询', '交易指令'})
 
 GENERAL_PROMPT = (
     '你是通用智能助手。直接回答用户的非理赔问题，语言清晰、准确。'
@@ -112,7 +121,8 @@ def _conversation(question: str, history: list[Any], system_prompt: str) -> list
 
 
 def build_assistant_graph(*, classifier: Any, general_model: Any,
-                          assistant_model: Any, service: Any) -> Any:
+                          assistant_model: Any, service: Any,
+                          investment_model: Any = None) -> Any:
     """构建无状态对话助手图；依赖经闭包注入，节点为 async 编排函数。"""
 
     async def classify(state: AssistantState) -> dict[str, Any]:
@@ -153,6 +163,21 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
             messages = _conversation(state['question'], state['history'],
                                      GENERAL_PROMPT + f'用户已上传资料摘要：{state["context"]}')
             stage = 'general'
+            needs_llm_answer = True
+        elif intent.intent in INVESTMENT_INTENTS:
+            llm = investment_model or general_model
+            stage = 'investment'
+            if intent.intent == '交易指令':
+                messages = []
+                needs_llm_answer = False
+            else:
+                messages = _conversation(
+                    state['question'], state['history'],
+                    INVESTMENT_ADVISOR_PROMPT
+                    + f'用户风险承受能力：{state.get("risk_profile") or "未提供"}。'
+                    + f'已识别单证摘要：{state["context"]}',
+                )
+                needs_llm_answer = True
         else:
             llm = assistant_model
             messages = _conversation(
@@ -160,12 +185,13 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
                 CLAIMS_PROMPT + f'当前案件号：{mask_pii(state["claim_id"] or "未填写")}。已识别单证：{state["context"]}',
             )
             stage = 'claims'
+            needs_llm_answer = True
         events.append({'trace': {'node': 'route', 'status': 'done', 'selected': stage,
                                  'input': intent.model_dump() | {'material_continuation': material_continuation},
                                  'output': {'selected': stage, 'model': getattr(llm, 'model_name', '测试模型')}}})
         return {'intent': intent.intent, 'confidence': intent.confidence, 'policy_id': intent.policy_id,
                 'material_continuation': material_continuation, 'stage': stage,
-                'llm': llm, 'messages': messages, 'needs_llm_answer': True, 'events': events}
+                'llm': llm, 'messages': messages, 'needs_llm_answer': needs_llm_answer, 'events': events}
 
     async def policy_query(state: AssistantState) -> dict[str, Any]:
         events: list[dict[str, Any]] = []
@@ -421,8 +447,30 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
 
         return {'events': events, 'needs_llm_answer': False}
 
+    async def investment_trade(state: AssistantState) -> dict[str, Any]:
+        """交易指令只做安全拦截和材料提示，不调用下单工具。"""
+        events: list[dict[str, Any]] = []
+        message = (
+            '交易指令不会由模型直接执行。请提供产品代码、交易金额和风险承受能力；'
+            '系统会先做适当性校验，再要求你二次确认，并转授权人员审批。'
+            '在审批完成前不会下单。'
+        )
+        events.append({'trace': {'node': 'investment', 'status': 'running',
+                                 'summary': '交易指令进入高风险案件模式',
+                                 'input': {'intent': state['intent'], 'question': state['question']}}})
+        events.append({'trace': {'node': 'investment', 'status': 'done',
+                                 'summary': '已拦截直接下单，等待二次确认与人工审批',
+                                 'output': {'executed': False, 'requires_confirmation': True,
+                                            'requires_human_review': True}}})
+        events.append({'content': message})
+        return {'events': events, 'needs_llm_answer': False}
+
     def route_after_classify(state: AssistantState) -> str:
+        if state['intent'] == '交易指令':
+            return 'investment_trade'
         if state['stage'] == 'general':
+            return 'answer'
+        if state['stage'] == 'investment':
             return 'answer'
         if state['intent'] == '保单查询':
             return 'policy_query'
@@ -437,11 +485,14 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
     graph.add_node('material_gate', material_gate)
     graph.add_node('follow_up', follow_up)
     graph.add_node('formal_review', formal_review)
+    graph.add_node('investment_trade', investment_trade)
     graph.add_edge(START, 'classify')
     graph.add_conditional_edges('classify', route_after_classify,
-                                {'answer': END, 'policy_query': 'policy_query', 'material_gate': 'material_gate'})
+                                {'answer': END, 'policy_query': 'policy_query',
+                                 'material_gate': 'material_gate', 'investment_trade': 'investment_trade'})
     graph.add_edge('policy_query', END)
     graph.add_conditional_edges('material_gate', route_after_gate, {'follow_up': 'follow_up', 'formal_review': 'formal_review'})
     graph.add_edge('follow_up', END)
     graph.add_edge('formal_review', END)
+    graph.add_edge('investment_trade', END)
     return graph.compile()

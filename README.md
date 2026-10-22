@@ -1,6 +1,6 @@
 # 理赔 Agent 培训材料实现
 
-依据 `claims-langchain-training.md` 实现分层代码、演示、测试和部署配置。主项目要求Python 3.12+（当前开发与验证环境为Python 3.14）、LangChain 0.3.14、langchain-openai 0.2.14；官方Deep Agents单独安装。默认连接本地推理，百炼需显式选择。真实模式未配置业务适配器会转人工，不返回假保单或虚构定损。
+依据 `claims-langchain-training.md` 实现分层代码、演示、测试和部署配置。主项目要求Python 3.12+（当前开发环境为 Python 3.15，`pytest` 已验证通过）、LangChain 0.3.14、langchain-openai 0.2.14；官方Deep Agents单独安装。默认连接本地推理，百炼需显式选择。真实模式未配置业务适配器会转人工，不返回假保单或虚构定损。
 
 完整逐项映射及验证边界见 [实现验收清单](docs/implementation-matrix.md)；原文API与业务规则修正见 [差异记录](docs/material-differences.md)。
 
@@ -8,17 +8,28 @@
 
 | 提示符 | 用途 | 里面有什么 |
 | --- | --- | --- |
-| `(.venv-py314)` | **主项目**：启动 Web 服务、跑测试、调用大模型 | FastAPI、uvicorn、LangChain 0.3 全家桶 |
+| `(.venv-py315)` | **主项目**：启动 Web 服务、跑测试、调用大模型 | FastAPI、uvicorn、LangChain 0.3 全家桶 |
 | `(.venv-deep)` | 官方 Deep Agents 隔离环境 | 只有 deepagents 及其依赖，**没有 uvicorn / FastAPI** |
 
-启动服务前，先确认 PowerShell 提示符是 `(.venv-py314)`；如果不是，先切换：
+启动服务前，先确认提示符是 `(.venv-py315)`；如果不是，先切换。
+
+PowerShell：
 
 ```powershell
 deactivate
-.\.venv-py314\Scripts\Activate.ps1
+.\.venv-py315\Scripts\Activate.ps1
 ```
 
-> 若执行 `uvicorn ...` 报「无法将 uvicorn 识别为 cmdlet」，十有八九是当前激活成了 `.venv-deep`。
+Git Bash：
+
+```bash
+deactivate
+source .venv-py315/Scripts/activate
+```
+
+> 若执行 `uvicorn ...` 报「无法将 uvicorn 识别为 cmdlet」或 `command not found`，十有八九是当前激活成了 `.venv-deep`。
+
+> 旧的 `.venv-py314` / `.venv-deep` 依赖的基础解释器 Python 3.14 已从本机卸载，两个环境均已失效，请勿继续使用。需要 Deep Agents 时，用 Python 3.15 重建 `.venv-deep`（先确认 `deepagents` 支持 3.15）。
 
 ## 结构与职责
 
@@ -52,6 +63,8 @@ claims-agent-app/
 │   ├── policy_store.py         # 本地SQLite保单数据源（模拟数据）
 │   └── claim_write_producer.py # 幂等Outbox、重试及对账
 ├── adapters/                   # 真实接口与演示后端，未配置显式失败
+├── claims_platform/            # 平台内核：领域注册与意图路由（不可命名为 platform，会遮蔽标准库）
+├── vendor/                     # 无 cp315 wheel 时使用的预构建纯 Python wheel（PyYAML）
 ├── prompts/                    # 四场景模板、动态规则与本地固定版本
 ├── models/                     # Pydantic契约、有限修复和Schema迁移
 ├── tests/                      # 单元、SDK协议、状态机、HTTP与可选Milvus集成
@@ -69,6 +82,8 @@ claims-agent-app/
 ```
 
 agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
+
+> `claims_platform/` 原名 `platform/`，与标准库同名会遮蔽 `platform` 模块，导致 `coverage`、`setuptools` 等直接报 `module 'platform' has no attribute ...`。已重命名为 `claims_platform/`，并同步更新 `scripts/eval_intent.py` 与 `tests/test_intent_*.py` 的导入；新增代码不要再用 `platform` 作为包名。
 
 > 注：`My_Study/` 为个人学习测试目录，不属于本项目实现，可忽略。
 
@@ -100,26 +115,27 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
 ## 安装和离线验证
 
-在项目根目录执行。项目要求 Python 3.12+；当前开发与验证环境为 Python 3.14（Windows 无需 C 编译器，已验证 `pytest`）。`requirements.txt` 已适配 Python 3.14，完整冻结见 `requirements-py314.lock.txt`，原 Python 3.12 锁定版本保留在 `requirements-legacy-py312.lock.txt`。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务。
+在项目根目录执行。项目要求 Python 3.12+；当前开发环境为 Python 3.15（Windows 无需 C 编译器）。`requirements.txt` 为精确锁定版本，完整冻结见 `requirements-py315.lock.txt`；历史版本保留在 `requirements-py314.lock.txt`（Python 3.14）与 `requirements-legacy-py312.lock.txt`（Python 3.12）。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务。
 
-```bash
-python3.14 -m venv .venv-py314
-source .venv-py314/bin/activate
-python -m pip install -r requirements.txt
-python -m pip check
-# 首次创建；已有.env不要覆盖。
-if [ ! -f .env ]; then cp .env.example .env; chmod 600 .env; fi
-python -m pytest -q
-python claims_agent.py --demo
-python -m demos.module04_demo --prompts
-python -m scripts.benchmark_parsers
-```
+3.15 适配要点：部分旧锁定版本没有 `cp315` Windows wheel，已做最小升级；`PyYAML 6.0.3` 官方无 `cp315` wheel，改用 `vendor/pyyaml-6.0.3-py3-none-any.whl`（纯 Python 构建，功能等价，仅关闭 libyaml C 加速），因此无需安装 Visual C++ 生成工具。
 
-Windows（PowerShell）等价命令：
+| 包 | 原版本 | 现版本 | 原因 |
+| --- | --- | --- | --- |
+| aiohttp | 3.14.3 | 3.14.4 | 无 cp315 wheel |
+| markupsafe | 3.0.3 | 3.0.4 | 无 cp315 wheel |
+| pandas | 2.3.3 | 3.0.6 | 2.3.x 无 cp315 wheel，最小可用为 3.0.6 |
+| yarl | 1.24.5 | 1.25.1 | aiohttp 3.14.4 要求 `yarl>=1.25.1` |
+| PyYAML | 6.0.3 | 6.0.3（纯 Python wheel） | 官方无 cp315 wheel，见 `vendor/` |
+| ruff | 0.9.10 | 不变 | 自带 `py3-none-win_amd64` wheel |
+
+> 验证结果：`pip check` 无依赖冲突；`pytest` 为 **125 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例）。
+
+Windows（PowerShell）：
 
 ```powershell
-py -3.14 -m venv .venv-py314
-.\.venv-py314\Scripts\Activate.ps1
+py -3.15 -m venv .venv-py315
+.\.venv-py315\Scripts\Activate.ps1
+python -m pip install -U pip
 python -m pip install -r requirements.txt
 python -m pip check
 # 首次创建；已有.env不要覆盖。
@@ -130,36 +146,60 @@ python -m demos.module04_demo --prompts
 python -m scripts.benchmark_parsers
 ```
 
+Windows（Git Bash）：
+
+```bash
+python -m venv .venv-py315
+source .venv-py315/Scripts/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+python -m pip check
+# 首次创建；已有.env不要覆盖。
+if [ ! -f .env ]; then cp .env.example .env; chmod 600 .env; fi
+python -m pytest -q
+python claims_agent.py --demo
+python -m demos.module04_demo --prompts
+python -m scripts.benchmark_parsers
+```
+
+Linux/macOS 只需把激活路径换成 `bin/`：
+
+```bash
+python3.15 -m venv .venv-py315
+source .venv-py315/bin/activate
+python -m pip install -r requirements.txt
+```
+
 这些离线演示不代表真实模型、赔付系统或向量服务已联通。模型服务需支持OpenAI兼容聊天、JSON、tools；部分流式服务不返回usage，此时用量标记未知，不能声称零成本。固定seed只尽力复现。
 
 ## 启动HTTP服务
 
-使用主项目环境 `.venv-py314`（不是 Deep Agents 的 `.venv-deep`，后者不含 FastAPI/uvicorn）。
+使用主项目环境 `.venv-py315`（不是 Deep Agents 的 `.venv-deep`，后者不含 FastAPI/uvicorn）。
 
-```bash
-deactivate
-.\.venv-py314\Scripts\Activate.ps1
-source .venv-py314/bin/activate
-uvicorn app:app --host 127.0.0.1 --port 8001
-# 另一个终端
-curl -fsS http://127.0.0.1:8001/health
-python health_check.py
-```
-
-Windows（PowerShell）：
+PowerShell：
 
 ```powershell
-.\.venv-py314\Scripts\Activate.ps1
+.\.venv-py315\Scripts\Activate.ps1
 uvicorn app:app --host 127.0.0.1 --port 8001
 # 另一个终端；PowerShell 里 curl 是 Invoke-WebRequest 别名，需明确调用 curl.exe
 curl.exe -fsS http://127.0.0.1:8001/health
 python health_check.py
 ```
 
+Git Bash：
+
+```bash
+source .venv-py315/Scripts/activate
+uvicorn app:app --host 127.0.0.1 --port 8001
+# 另一个终端
+curl -fsS http://127.0.0.1:8001/health
+python health_check.py
+```
+
 若不激活环境，也可直接用主环境解释器启动：
 
 ```powershell
-.\.venv-py314\Scripts\uvicorn.exe app:app --host 127.0.0.1 --port 8001
+.\.venv-py315\Scripts\uvicorn.exe app:app --host 127.0.0.1 --port 8001
 ```
 
 启动后访问 `http://127.0.0.1:8001/` 使用理赔智能助手。页面采用普通对话形式，支持多轮意图识别、PDF/DOCX/文本抽取、图片视觉识别，以及结合识别结果的流式问答。点击“载入演示”可用固定合成案件运行完整状态机，查看报案、保单、三专家、置信度和决策链路；该入口不调用真实业务系统，生产环境自动禁用。分类器读取最近六条消息和上一轮意图：省略主语的追问继承当前主题，明确的新问题允许切换主题。材料审核会按附件类型核查保单信息、事故/出险证明和费用/损失凭证；缺失时保留累计附件并最多回流追问三轮，仍不完整则建议转人工，材料补齐后轮次清零并继续理赔链路。五类理赔意图进入理赔专用提示和合规约束；一般咨询交给通用基模回答。附件仅在请求内存中处理，不落盘；图片识别要求配置的模型支持 OpenAI 兼容多模态消息。

@@ -110,6 +110,10 @@ TASK_PROFILES: Final[dict[str, TaskProfile]] = {
     "human_review": TaskProfile("plus", 0.2, 2000),
     "customer_service": TaskProfile("plus", 0.6, 1000, top_p=0.9, response_format="text"),
     "status_query": TaskProfile("flash", 0.2, 300, response_format="text"),
+    "investment_advice": TaskProfile("plus", 0.4, 1800, top_p=0.9, response_format="text"),
+    "investment_risk": TaskProfile("max", 0.2, 1200),
+    "investment_suitability": TaskProfile("plus", 0.1, 800),
+    "investment_trade": TaskProfile("max", 0.1, 1200),
     "fallback": TaskProfile("flash", 0.2, 500, response_format="text"),
 }
 
@@ -135,7 +139,7 @@ MODEL_ROUTING: Final[dict[str, ChatOpenAI]] = {
 def get_model(task: str) -> ChatOpenAI:
     """获取任务模型；未知任务显式报错，不自动降级判责。"""
     if task not in MODEL_ROUTING:
-        raise ValueError(f"未知理赔任务：{task}")
+        raise ValueError(f"未知任务：{task}")
     return MODEL_ROUTING[task]
 
 

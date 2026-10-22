@@ -1,6 +1,8 @@
-# 已适配 Python 3.14（Windows 无编译环境）：仅将无 cp314 wheel 的编译包升级，
-# 其余保持原锁定版本。原 Python 3.12 锁定文件见 requirements-legacy-py312.lock.txt。
+# 已适配 Python 3.15（Windows 无编译环境）：仅将无 cp315 wheel 的编译包升级，
+# 其余保持原锁定版本。历史冻结见 requirements-py314.lock.txt（Python 3.14）
+# 与 requirements-legacy-py312.lock.txt（Python 3.12）。
 # Windows 不安装 milvus-lite（其仅支持 Linux/macOS），RAG 连接外部 Milvus 服务。
+# 注意：PyYAML 6.0.3 暂无 cp315 Windows wheel，需先用纯 Python 方式构建（见 README）。
 
 # LangChain 0.3 系列与本地 OpenAI 兼容推理接口
 langchain==0.3.14
@@ -29,7 +31,10 @@ setuptools>=75.6.0
 pydantic==2.14.0
 pydantic-settings>=2.7
 python-dotenv==1.0.1
-PyYAML==6.0.3
+PyYAML==6.0.3 ; python_version < "3.15"
+# PyYAML 6.0.3 官方尚无 cp315 wheel，Windows 又无 C 编译器；
+# 3.15 上改用纯 Python 预构建 wheel（内容与原包一致，仅关闭 libyaml C 扩展）。
+./vendor/pyyaml-6.0.3-py3-none-any.whl ; python_version >= "3.15"
 
 # HTTP API 与服务运行
 fastapi>=0.115.6
@@ -49,7 +54,7 @@ pytest-cov==6.0.0
 
 # 传递依赖完整锁定（Python 3.12+；本次干净安装验证为Python 3.14/Windows）
 aiohappyeyeballs==2.7.1
-aiohttp==3.14.3
+aiohttp==3.14.4
 aiosignal==1.4.0
 annotated-types==0.8.0
 anyio==4.15.1
@@ -72,13 +77,13 @@ iniconfig==2.3.0
 jiter==0.17.0
 jsonpatch==1.33
 jsonpointer==3.1.1
-markupsafe==3.0.3
+markupsafe==3.0.4
 msgpack==1.2.2
 multidict==6.8.0
 mypy-extensions==1.1.0
 orjson==3.12.0
 packaging==24.2
-pandas==2.3.3
+pandas==3.0.6
 pluggy==1.6.0
 propcache==0.5.2
 protobuf==5.29.3
@@ -97,7 +102,7 @@ typing-inspect==0.9.0
 tzdata==2026.4
 ujson==6.0.0
 urllib3==2.7.0
-yarl==1.24.5
+yarl==1.25.1
 
 # 新增模块与解析出的传递依赖（干净Python 3.12环境验证）
 aiosqlite==0.20.0

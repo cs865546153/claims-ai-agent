@@ -239,7 +239,10 @@ async function runDemoClaim(endpoint = "/api/demo/claims/process") {
     setTraceParams("classification", {mode: "demo"}, {skipped: true});
     updateTrace({node: "route", status: "done", selected: "claims", input: {mode: "demo"}, output: {selected: "claims"}});
     traceNode("claims", "running", "正在运行合成理赔状态机");
+    traceNode("capability_state", "running", "初始化进程内 checkpointer");
     data.trace.forEach(updateTrace);
+    traceNode("capability_state", "compat", "进程内 checkpointer 保存案件状态");
+    traceNode("capability_outbox", "notconnected", "Outbox 未闭环，事件未落库");
     const decision = {accept: "受理建议", review: "人工复核", reject: "不受理建议", investigate: "调查核实"}[data.result.decision] || data.result.decision;
     traceNode("claims", "done", `演示决策：${decision}`);
     setTraceParams("claims", data.claim, data.result);
@@ -305,7 +308,11 @@ document.querySelectorAll(".quick-actions button").forEach((button) => button.ad
 
 const traceNames = {
   input: "接收消息", documents: "附件识别", classification: "多轮意图识别",
-  route: "选择回答链路", claims: "理赔智能体", general: "通用基模", output: "返回回答",
+  intent_router: "领域意图路由", domain_registry: "领域注册校验", domain_plugin: "领域插件",
+  route: "选择回答链路", claims: "理赔智能体", investment: "投资智能体",
+  general: "通用基模", output: "返回回答",
+  capability_state: "状态存储", capability_rag: "知识检索",
+  capability_hitl: "人工审核", capability_outbox: "事件出箱",
   claim_intake: "报案信息核查", claim_documents: "理赔单证核查", claim_followup: "补充材料追问",
   claim_policy: "保单与责任核验",
   claim_damage: "损失专家", claim_risk: "风险专家", claim_liability: "责任专家",
@@ -315,6 +322,14 @@ const claimTraceNodes = [
   "claim_intake", "claim_documents", "claim_followup", "claim_policy", "claim_damage", "claim_risk",
   "claim_liability", "claim_confidence", "claim_decision",
 ];
+const domainTraceNodes = ["claims", "investment", "general"];
+const capabilityTraceNodes = [
+  "capability_state", "capability_rag", "capability_hitl", "capability_outbox",
+];
+const traceStateLabels = {
+  waiting: "等待", running: "执行中", done: "已完成",
+  skipped: "未调用", error: "失败", compat: "兼容", notconnected: "未接入",
+};
 function setTraceParams(id, input, output) {
   const node = document.querySelector(`[data-node="${id}"]`);
   if (!node) return;
@@ -333,8 +348,9 @@ function redactTrace(value) {
 function traceNode(id, status, detail = "") {
   const node = document.querySelector(`[data-node="${id}"]`);
   if (!node) return;
-  node.className = `trace-node ${status}`;
-  node.querySelector(".node-state").textContent = {waiting:"等待", running:"执行中", done:"已完成", skipped:"未调用", error:"失败"}[status];
+  node.classList.remove("waiting", "running", "done", "skipped", "error", "compat", "notconnected");
+  node.classList.add(status);
+  node.querySelector(".node-state").textContent = traceStateLabels[status] || status;
   if (detail) node.querySelector("small").textContent = detail;
 }
 const traceDetails = {};
@@ -345,9 +361,23 @@ function resetTrace() {
   const expertRow = `<div class="trace-parallel"><span>并行分析</span><div class="trace-experts">${["claim_damage", "claim_risk", "claim_liability"].map(id => node(id, "compact")).join("")}</div></div>`;
   const loop = '<div class="trace-loop" aria-label="材料不足时回流补充">↶ 材料不足时回流上传并重新核查</div>';
   const claimDetail = `<section id="claimTraceDetail" class="claim-trace-detail"><header><strong>理赔状态机明细</strong><span>对话预审 / 正式核赔节点</span></header>${node("claim_intake")}${arrow}${node("claim_documents")}${loop}${node("claim_followup")}${arrow}${node("claim_policy")}${arrow}${expertRow}${arrow}${node("claim_confidence")}${arrow}${node("claim_decision")}</section>`;
-  $("traceGraph").innerHTML = ["input", "documents", "classification", "route"].map(node).join(arrow)
-    + arrow + '<div class="trace-branches">' + node("claims") + node("general") + '</div>'
-    + claimDetail + arrow + node("output");
+  const platformDetail = `<section id="platformTraceDetail" class="trace-section"><header><strong>平台内核</strong><span>意图路由 / 领域注册 / 链路选择</span></header>${node("intent_router")}${arrow}${node("domain_registry")}${arrow}${node("route")}</section>`;
+  const pluginDetail = `<section id="pluginTraceDetail" class="trace-section"><header><strong>领域插件</strong><span>当前选择的业务域</span></header>${node("domain_plugin")}<div class="trace-branches three">${domainTraceNodes.map(id => node(id, "compact")).join("")}</div></section>`;
+  const capabilityDetail = `<section id="capabilityTraceDetail" class="trace-section"><header><strong>Capability SPI</strong><span>状态 / 检索 / 审核 / 事件</span></header><div class="trace-capabilities">${capabilityTraceNodes.map(id => node(id, "compact")).join("")}</div></section>`;
+  $("traceGraph").innerHTML = ["input", "documents", "classification"].map(id => node(id)).join(arrow)
+    + arrow + platformDetail
+    + arrow + pluginDetail
+    + arrow + claimDetail
+    + arrow + capabilityDetail
+    + arrow + node("output");
+  traceNode("intent_router", "notconnected", "新 IntentRouter 未接入，当前复用旧分类器");
+  traceNode("domain_registry", "notconnected", "新 DomainRegistry 未接入，当前由旧 route 选择");
+  traceNode("domain_plugin", "notconnected", "插件封装待接入，当前按链路选择");
+  traceNode("investment", "notconnected", "投资领域图待实现");
+  traceNode("capability_state", "compat", "进程内 checkpointer，未外部化");
+  traceNode("capability_rag", "skipped", "本轮未触发检索");
+  traceNode("capability_hitl", "skipped", "本轮未触发人工审核");
+  traceNode("capability_outbox", "notconnected", "Outbox 未闭环");
   $("traceStatus").textContent = "等待提问";
 }
 function updateTrace(event) {
@@ -358,19 +388,69 @@ function updateTrace(event) {
     event.elapsed_ms != null ? `${event.elapsed_ms} ms` : ""].filter(Boolean).join(" · ");
   traceNode(event.node, event.status, detail);
   setTraceParams(event.node, event.input, event.output);
-  if (["claims", "general"].includes(event.node) && event.output) {
-    setTraceParams("output", event.output, event.status === "done" ? {content: event.output.content, completed: true} : event.output);
-  }
-  if (event.node === "route") {
-    traceNode("route", "done", event.selected === "general" ? "一般咨询 → 通用基模" : "理赔意图 → 理赔智能体");
-    traceNode(event.selected === "general" ? "claims" : "general", "skipped", "本轮未选择此链路");
-    const detail = $("claimTraceDetail");
-    detail.classList.toggle("inactive", event.selected === "general");
-    if (event.selected === "general") {
-      claimTraceNodes.forEach(id => traceNode(id, "skipped", "一般咨询未进入理赔状态机"));
+
+  if (event.node === "classification" && !traceDetails.intent_router) {
+    if (event.status === "running") traceNode("intent_router", "running", "复用旧分类器识别意图");
+    if (event.status === "done") {
+      traceNode("intent_router", "compat", `兼容旧分类器 · ${event.intent || "意图已识别"}`);
+      if (event.output) {
+        setTraceParams("intent_router", {source: "assistant_agent.classify"}, {
+          intent: event.intent, confidence: event.output.confidence,
+        });
+      }
     }
   }
-  if (["claims", "general"].includes(event.node) && event.status === "running") traceNode("output", "running", "等待并接收流式回答");
+
+  if (["claims", "general", "investment"].includes(event.node) && event.output) {
+    setTraceParams("output", event.output, event.status === "done" ? {content: event.output.content, completed: true} : event.output);
+  }
+
+  if (event.node === "route") {
+    const selected = event.selected || "claims";
+    const routeText = selected === "general"
+      ? "一般咨询 → 通用基模"
+      : selected === "investment" ? "投资意图 → 投资智能体" : "理赔意图 → 理赔智能体";
+    traceNode("route", "done", routeText);
+    if (!traceDetails.domain_registry) {
+      traceNode("domain_registry", "compat", `当前由旧 route 选择 ${selected}`);
+      setTraceParams("domain_registry", {source: "assistant_agent.route"}, {domain: selected});
+    }
+    if (!traceDetails.domain_plugin) traceNode("domain_plugin", "compat", `当前选择 ${selected} 领域`);
+    domainTraceNodes.forEach(id => {
+      if (id === selected) {
+        traceNode(id, "running", id === "claims" ? "理赔领域插件执行中" : id === "investment" ? "投资领域插件执行中" : "通用领域执行中");
+      } else {
+        traceNode(id, id === "investment" ? "notconnected" : "skipped", id === "investment" ? "投资领域图待实现" : "本轮未选择此链路");
+      }
+    });
+    const claimDetail = $("claimTraceDetail");
+    claimDetail.classList.toggle("inactive", selected !== "claims");
+    if (selected !== "claims") {
+      claimTraceNodes.forEach(id => traceNode(id, "skipped", selected === "investment" ? "投资链路未进入理赔状态机" : "一般咨询未进入理赔状态机"));
+    }
+  }
+
+  if (event.node === "claim_policy" && ["running", "done"].includes(event.status) && !traceDetails.capability_rag) {
+    traceNode("capability_rag", event.status === "done" ? "done" : "running", "保单 / 条款知识检索");
+    if (event.output) setTraceParams("capability_rag", {source: "claim_policy"}, event.output);
+  }
+
+  if (event.node === "claim_decision" && event.status === "done" && !traceDetails.capability_hitl) {
+    const decision = event.output?.decision;
+    if (decision === "review" || decision === "investigate") {
+      traceNode("capability_hitl", "done", "已路由人工复核");
+    } else {
+      traceNode("capability_hitl", "skipped", "自动通过，无需人工");
+    }
+    setTraceParams("capability_hitl", {decision}, event.output);
+  }
+
+  if (["claims", "general", "investment"].includes(event.node) && event.status === "running") {
+    traceNode("output", "running", "等待并接收流式回答");
+  }
+  if (event.node === "claims" && event.status === "done" && !traceDetails.capability_state) {
+    traceNode("capability_state", "compat", "案件上下文已返回；进程内状态未外部化");
+  }
 }
 resetTrace();
 checkHealth();

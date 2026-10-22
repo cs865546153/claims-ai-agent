@@ -39,8 +39,21 @@ class Settings(BaseSettings):
     langfuse_host: str = 'http://127.0.0.1:3000'
     langfuse_public_key: str = ''
     langfuse_secret_key: SecretStr = SecretStr('')
+    # 意图路由：默认 shadow（LLM 主路由 + JEV 影子），中文评测达标后再切 hybrid。
+    intent_engine: Literal['jev', 'llm', 'hybrid', 'shadow'] = 'shadow'
+    intent_primary: str | None = None
+    intent_fallback: str | None = None
+    intent_shadow: str | None = None
+    intent_confidence_threshold: float = 0.8
+    intent_margin_threshold: float = 0.2
+    intent_translate_to_english: bool = False
+    jev_base_url: str = 'https://tokendance.space/gateway/typesafe/v1/systemone'
+    jev_api_key: SecretStr = SecretStr('')
+    jev_model: str = 'ateve-jev-v1'
+    jev_timeout_s: float = 10.0
 
-    @field_validator('local_llm_base_url', 'embedding_base_url', 'deepseek_base_url', 'openai_base_url', 'langfuse_host')
+    @field_validator('local_llm_base_url', 'embedding_base_url', 'deepseek_base_url', 'openai_base_url',
+                     'jev_base_url', 'langfuse_host')
     @classmethod
     def endpoint(cls, value: str) -> str:
         parsed = urlsplit(value)
