@@ -59,7 +59,7 @@ function addUserMessage(content, files = []) {
 function addAssistantMessage() {
   const article = document.createElement("article");
   article.className = "message assistant";
-  article.innerHTML = '<div class="avatar" aria-hidden="true">理</div><div class="message-body"><div class="intent" hidden></div><div class="bubble"><p>正在分析…</p></div><div class="document-details" hidden></div></div>';
+  article.innerHTML = '<div class="avatar" aria-hidden="true">智</div><div class="message-body"><div class="intent" hidden></div><div class="bubble"><p>正在分析…</p></div><div class="document-details" hidden></div></div>';
   $("chatMessages").appendChild(article);
   scrollToBottom();
   return article;
@@ -175,7 +175,7 @@ async function streamAnswer(question, newDocuments, article) {
 async function sendMessage(rawQuestion) {
   if (state.busy) return;
   const files = [...state.pendingFiles];
-  const question = rawQuestion.trim() || (files.length ? "请识别并总结我上传的理赔单证。" : "");
+  const question = rawQuestion.trim() || (files.length ? "请识别并总结我上传的单证。" : "");
   if (!question) return;
   state.busy = true;
   $("newChat").disabled = true;
@@ -302,7 +302,7 @@ $("newChat").addEventListener("click", () => {
   state.materialRound = 0;
   state.pendingFiles = [];
   renderPendingFiles();
-  $("chatMessages").innerHTML = '<article class="message assistant"><div class="avatar" aria-hidden="true">理</div><div class="message-body"><div class="bubble"><p>新对话已开始。请描述你的问题或上传理赔单证。</p></div></div></article>';
+  $("chatMessages").innerHTML = '<article class="message assistant"><div class="avatar" aria-hidden="true">智</div><div class="message-body"><div class="bubble"><p>新对话已开始。请描述你的理赔、投资或通用问题，也可以上传附件。</p></div></div></article>';
 });
 document.querySelectorAll(".quick-actions button").forEach((button) => button.addEventListener("click", () => sendMessage(button.textContent)));
 
@@ -317,17 +317,24 @@ const traceNames = {
   claim_policy: "保单与责任核验",
   claim_damage: "损失专家", claim_risk: "风险专家", claim_liability: "责任专家",
   claim_confidence: "置信度计算", claim_decision: "审核决策路由",
+  investment_intake: "投资请求核查", investment_context: "组合与行情上下文",
+  investment_risk: "适当性与风险校验", investment_decision: "投资决策建议",
+  investment_review: "人工审批", investment_execute: "交易执行",
 };
 const claimTraceNodes = [
   "claim_intake", "claim_documents", "claim_followup", "claim_policy", "claim_damage", "claim_risk",
   "claim_liability", "claim_confidence", "claim_decision",
 ];
 const domainTraceNodes = ["claims", "investment", "general"];
+const investmentTraceNodes = [
+  "investment_intake", "investment_context", "investment_risk",
+  "investment_decision", "investment_review", "investment_execute",
+];
 const capabilityTraceNodes = [
   "capability_state", "capability_rag", "capability_hitl", "capability_outbox",
 ];
 const traceStateLabels = {
-  waiting: "等待", running: "执行中", done: "已完成",
+  waiting: "等待", running: "执行中", done: "已完成", cancelled: "已取消",
   skipped: "未调用", error: "失败", compat: "兼容", notconnected: "未接入",
 };
 function setTraceParams(id, input, output) {
@@ -361,6 +368,7 @@ function resetTrace() {
   const expertRow = `<div class="trace-parallel"><span>并行分析</span><div class="trace-experts">${["claim_damage", "claim_risk", "claim_liability"].map(id => node(id, "compact")).join("")}</div></div>`;
   const loop = '<div class="trace-loop" aria-label="材料不足时回流补充">↶ 材料不足时回流上传并重新核查</div>';
   const claimDetail = `<section id="claimTraceDetail" class="claim-trace-detail"><header><strong>理赔状态机明细</strong><span>对话预审 / 正式核赔节点</span></header>${node("claim_intake")}${arrow}${node("claim_documents")}${loop}${node("claim_followup")}${arrow}${node("claim_policy")}${arrow}${expertRow}${arrow}${node("claim_confidence")}${arrow}${node("claim_decision")}</section>`;
+  const investmentDetail = `<section id="investmentTraceDetail" class="trace-section inactive"><header><strong>投资智能体明细</strong><span>投顾问答 / 高风险交易案件</span></header>${node("investment_intake")}${arrow}${node("investment_context")}${arrow}${node("investment_risk")}${arrow}${node("investment_decision")}${arrow}${node("investment_review")}${arrow}${node("investment_execute")}</section>`;
   const platformDetail = `<section id="platformTraceDetail" class="trace-section"><header><strong>平台内核</strong><span>意图路由 / 领域注册 / 链路选择</span></header>${node("intent_router")}${arrow}${node("domain_registry")}${arrow}${node("route")}</section>`;
   const pluginDetail = `<section id="pluginTraceDetail" class="trace-section"><header><strong>领域插件</strong><span>当前选择的业务域</span></header>${node("domain_plugin")}<div class="trace-branches three">${domainTraceNodes.map(id => node(id, "compact")).join("")}</div></section>`;
   const capabilityDetail = `<section id="capabilityTraceDetail" class="trace-section"><header><strong>Capability SPI</strong><span>状态 / 检索 / 审核 / 事件</span></header><div class="trace-capabilities">${capabilityTraceNodes.map(id => node(id, "compact")).join("")}</div></section>`;
@@ -368,12 +376,14 @@ function resetTrace() {
     + arrow + platformDetail
     + arrow + pluginDetail
     + arrow + claimDetail
+    + arrow + investmentDetail
     + arrow + capabilityDetail
     + arrow + node("output");
   traceNode("intent_router", "notconnected", "新 IntentRouter 未接入，当前复用旧分类器");
   traceNode("domain_registry", "notconnected", "新 DomainRegistry 未接入，当前由旧 route 选择");
   traceNode("domain_plugin", "notconnected", "插件封装待接入，当前按链路选择");
-  traceNode("investment", "notconnected", "投资领域图待实现");
+  traceNode("investment", "compat", "已接入 · 咨询走对话，交易走确认 + 人工审批");
+  investmentTraceNodes.forEach(id => traceNode(id, "skipped", "本轮未进入投资链路"));
   traceNode("capability_state", "compat", "进程内 checkpointer，未外部化");
   traceNode("capability_rag", "skipped", "本轮未触发检索");
   traceNode("capability_hitl", "skipped", "本轮未触发人工审核");
@@ -420,9 +430,31 @@ function updateTrace(event) {
       if (id === selected) {
         traceNode(id, "running", id === "claims" ? "理赔领域插件执行中" : id === "investment" ? "投资领域插件执行中" : "通用领域执行中");
       } else {
-        traceNode(id, id === "investment" ? "notconnected" : "skipped", id === "investment" ? "投资领域图待实现" : "本轮未选择此链路");
+        traceNode(id, "skipped", "本轮未选择此链路");
       }
     });
+    const investmentDetail = $("investmentTraceDetail");
+    investmentDetail.classList.toggle("inactive", selected !== "investment");
+    if (selected === "investment") {
+      const intent = traceDetails.classification?.intent || "投资咨询";
+      if (intent === "交易指令") {
+        traceNode("investment_intake", "done", "已识别交易指令，尚未提交案件");
+        traceNode("investment_context", "skipped", "等待产品、金额与风险等级");
+        traceNode("investment_risk", "skipped", "案件提交后执行适当性校验");
+        traceNode("investment_decision", "done", "已拦截模型直接下单");
+        traceNode("investment_review", "compat", "二次确认后转人工审批");
+        traceNode("investment_execute", "skipped", "审批完成前不下单");
+      } else {
+        traceNode("investment_intake", "done", `已识别${intent}`);
+        traceNode("investment_context", "done", "已带入风险偏好与单证摘要");
+        traceNode("investment_risk", "skipped", "投顾咨询不单独计算交易适当性");
+        traceNode("investment_decision", "running", "投顾模型生成建议中");
+        traceNode("investment_review", "skipped", "咨询类请求无需人工审批");
+        traceNode("investment_execute", "skipped", "咨询不产生交易");
+      }
+    } else {
+      investmentTraceNodes.forEach(id => traceNode(id, "skipped", "本轮未进入投资链路"));
+    }
     const claimDetail = $("claimTraceDetail");
     claimDetail.classList.toggle("inactive", selected !== "claims");
     if (selected !== "claims") {
@@ -443,6 +475,12 @@ function updateTrace(event) {
       traceNode("capability_hitl", "skipped", "自动通过，无需人工");
     }
     setTraceParams("capability_hitl", {decision}, event.output);
+  }
+
+  if (event.node === "investment" && event.status === "done" && traceDetails.route?.selected === "investment") {
+    if (traceDetails.classification?.intent !== "交易指令") {
+      traceNode("investment_decision", "done", "投顾建议已生成");
+    }
   }
 
   if (["claims", "general", "investment"].includes(event.node) && event.status === "running") {

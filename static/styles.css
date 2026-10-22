@@ -124,6 +124,8 @@ button { cursor: pointer; }
 .trace-node.error { border-color: #cf7d76; background: #fff4f3; }
 .trace-node.error .node-state { color: var(--red); }
 .trace-node.skipped { opacity: .6; border-style: dashed; }
+.trace-node.cancelled { opacity: .6; border-style: dashed; }
+.trace-node.cancelled .node-state { color: #8a6d1f; }
 .trace-node.compat { border-color: #c9b26a; background: #fffaf0; }
 .trace-node.compat .node-state { color: #8a6d1f; }
 .trace-node.notconnected { opacity: .55; border-style: dotted; }

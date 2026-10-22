@@ -54,8 +54,9 @@ def test_workbench_page_and_assets() -> None:
     )) as client:
         page = client.get('/')
         assert page.status_code == 200
-        assert '理赔智能助手' in page.text
-        assert '载入演示' in page.text
+        assert '智能业务助手' in page.text
+        assert '投资组合诊断' in page.text
+        assert '离线载入演示' in page.text
         assert client.get('/static/styles.css').status_code == 200
 
 

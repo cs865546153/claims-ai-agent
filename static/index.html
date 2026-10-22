@@ -3,18 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="支持单证上传与意图识别的理赔智能助手">
-  <title>理赔智能助手</title>
+  <meta name="description" content="覆盖理赔、投资与通用咨询的智能业务助手">
+  <title>智能业务助手</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true">理</span>
-      <div><strong>理赔智能助手</strong><span><i id="healthDot"></i><b id="healthText">正在连接</b></span></div>
+      <span class="brand-mark" aria-hidden="true">智</span>
+      <div><strong>智能业务助手</strong><span><i id="healthDot"></i><b id="healthText">正在连接</b> · 理赔 / 投资 / 通用咨询</span></div>
     </div>
     <div class="topbar-actions">
-      <button id="demoCase" class="new-chat demo-case" type="button" title="载入固定合成数据，不影响真实附件解析">载入演示</button>
+      <button id="demoCase" class="new-chat demo-case" type="button" title="载入固定合成数据，不影响真实附件解析">离线载入演示</button>
       <button id="demoCaseLive" class="new-chat demo-case" type="button" title="用真实模型 + 内存条款跑完整判责 RAG 链路">真实理赔演示</button>
       <button id="newChat" class="new-chat" type="button"><span aria-hidden="true">＋</span>新对话</button>
     </div>
@@ -24,16 +24,18 @@
   <section class="chat-shell" aria-label="智能体对话">
     <section id="chatMessages" class="messages" aria-live="polite">
       <article class="message assistant">
-        <div class="avatar" aria-hidden="true">理</div>
+        <div class="avatar" aria-hidden="true">智</div>
         <div class="message-body">
           <div class="bubble">
-            <p>你好，我是理赔智能助手。你可以直接描述事故、询问理赔流程，或上传发票、病历、事故证明等单证。</p>
+            <p>你好，我是智能业务助手，可以处理理赔、投资和通用咨询。你可以描述事故、审核理赔材料、查询案件与保单，也可以做投资组合诊断、风险评估和产品查询；涉及交易指令时，我会先要求确认并转人工审批。</p>
           </div>
           <div class="quick-actions" aria-label="常用问题">
             <button type="button">我要申请理赔</button>
             <button type="button">帮我审核理赔材料</button>
             <button type="button">查询案件进度</button>
             <button type="button">查询保单</button>
+            <button type="button">投资组合诊断</button>
+            <button type="button">投资产品查询</button>
           </div>
         </div>
       </article>
@@ -44,10 +46,10 @@
       <form id="chatForm" class="composer">
         <button id="attachButton" class="icon-button" type="button" aria-label="上传附件" title="上传附件">＋</button>
         <input id="fileInput" type="file" multiple accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp" hidden>
-        <textarea id="question" rows="1" maxlength="4000" placeholder="输入理赔问题，或上传附件…" aria-label="输入理赔问题"></textarea>
+        <textarea id="question" rows="1" maxlength="4000" placeholder="输入理赔、投资或通用问题，也可上传附件…" aria-label="输入理赔、投资或通用问题"></textarea>
         <button id="sendQuestion" class="send-button" type="submit" aria-label="发送" title="发送">↑</button>
       </form>
-      <p class="composer-note">模型会识别对话意图。重要结论仍需依据真实保单条款和人工审核。</p>
+      <p class="composer-note">模型会识别对话意图并路由到对应领域。重要结论仍需依据真实条款、产品披露和人工审核。</p>
     </div>
   </section>
   <aside class="trace-panel" aria-label="链路调用可视化">

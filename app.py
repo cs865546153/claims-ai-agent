@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import time
@@ -47,6 +48,9 @@ from tools.document_analysis import (
     DocumentValidationError,
     analyze_document,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class HealthResponse(BaseModel):
@@ -108,7 +112,7 @@ def create_app(
             application.state.investment_graph = build_investment_graph(investment_service, saver)
             yield
 
-    application = FastAPI(title='理赔 Agent 服务', version='0.3.0', lifespan=lifespan)
+    application = FastAPI(title='智能业务助手服务', version='0.3.0', lifespan=lifespan)
     application.add_middleware(CORSMiddleware,
         allow_origins=[value.strip() for value in os.getenv('CORS_ALLOW_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000').split(',')],
         allow_credentials=False, allow_methods=['GET', 'POST'], allow_headers=['Content-Type', 'Authorization', 'X-API-Key', 'X-Reviewer-Key'])
@@ -548,12 +552,21 @@ def create_app(
                                                   'elapsed_ms': round((time.monotonic() - answer_started) * 1000),
                                                   'output': {'content': ''.join(answer_parts)}})})
                 yield sse({'done': True})
-            except Exception:
+            except Exception as exc:
+                logger.exception(
+                    'assistant model call failed at stage=%s provider=%s',
+                    stage,
+                    cfg.model_provider,
+                )
                 yield sse({'trace': mask_pii({'node': stage, 'status': 'error',
                                               'elapsed_ms': round((time.monotonic() - started) * 1000),
-                                              'output': {'error': '调用失败，未返回有效结果'}})})
+                                              'output': {'error': '调用失败，未返回有效结果',
+                                                         'error_type': type(exc).__name__}})})
                 ERRORS.labels('assistant_model').inc()
-                yield sse({'error': '意图识别或问答模型暂不可用，请检查本地推理服务'})
+                yield sse({'error': (
+                    f'模型调用失败（阶段：{stage}，类型：{type(exc).__name__}），'
+                    f'请检查 {cfg.model_provider} 模型服务配置、模型名称和网络连接'
+                )})
 
         return StreamingResponse(
             events(),
