@@ -18,6 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from adapters.business import BusinessBackend, DemoBackend
 from adapters.investment import DemoInvestmentBackend, InvestmentBackend
+from agents.audit_store import AuditStore
+from agents.http_middleware import EnterpriseHttpMiddleware
 from agents.claim_agent import WorkflowServices, build_claim_graph
 from agents.investment_agent import (
     InvestmentServices,
@@ -100,22 +102,41 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-        if os.getenv('APP_ENV') == 'production' and (not os.getenv('CLAIMS_API_KEY') or not os.getenv('REVIEWER_API_KEY')):
-            raise RuntimeError('生产环境必须配置CLAIMS_API_KEY和REVIEWER_API_KEY')
+        # 先配置日志，后续启动校验与业务日志才不会被默认级别丢弃。
+        configure_logging()
+        if os.getenv('APP_ENV') == 'production':
+            claims_key = os.getenv('CLAIMS_API_KEY', '')
+            reviewer_key = os.getenv('REVIEWER_API_KEY', '')
+            if not claims_key or not reviewer_key:
+                raise RuntimeError('生产环境必须配置CLAIMS_API_KEY和REVIEWER_API_KEY')
+            weak = {'changeme', 'secret', 'password', 'test', 'dev', 'admin', '123456'}
+            for name, value in (('CLAIMS_API_KEY', claims_key), ('REVIEWER_API_KEY', reviewer_key)):
+                if len(value) < 16 or value.lower() in weak:
+                    raise RuntimeError(f'生产环境 {name} 过弱：至少 16 位且不能是常见口令')
+            if Path('.env').exists():
+                logger.warning('生产环境检测到 .env 文件：请改用环境变量或密钥管理（Vault/KMS）注入')
         path = database or os.getenv('CLAIMS_CHECKPOINT_DB') or '.data/checkpoints.sqlite'
         if path != ':memory:':
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        configure_logging()
-        async with AsyncSqliteSaver.from_conn_string(path) as saver:
-            await saver.setup()
-            application.state.graph = build_claim_graph(service, saver)
-            application.state.investment_graph = build_investment_graph(investment_service, saver)
-            yield
+        audit_path = (os.getenv('CLAIMS_AUDIT_DB')
+                      or (':memory:' if path == ':memory:' else '.data/audit.sqlite'))
+        audit = AuditStore(audit_path)
+        application.state.audit = audit
+        try:
+            async with AsyncSqliteSaver.from_conn_string(path) as saver:
+                await saver.setup()
+                application.state.graph = build_claim_graph(service, saver)
+                application.state.investment_graph = build_investment_graph(investment_service, saver)
+                yield
+        finally:
+            audit.close()
 
     application = FastAPI(title='智能业务助手服务', version='0.3.0', lifespan=lifespan)
+    # 注册顺序即嵌套顺序：后添加的在外层。CORS 必须最外层，错误响应才带 CORS 头。
+    application.add_middleware(EnterpriseHttpMiddleware)
     application.add_middleware(CORSMiddleware,
         allow_origins=[value.strip() for value in os.getenv('CORS_ALLOW_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000').split(',')],
-        allow_credentials=False, allow_methods=['GET', 'POST'], allow_headers=['Content-Type', 'Authorization', 'X-API-Key', 'X-Reviewer-Key'])
+        allow_credentials=False, allow_methods=['GET', 'POST'], allow_headers=['Content-Type', 'Authorization', 'X-API-Key', 'X-Reviewer-Key', 'X-Request-ID'])
     static_dir = Path(__file__).resolve().parent / 'static'
     application.mount('/static', StaticFiles(directory=static_dir), name='static')
 
@@ -215,6 +236,19 @@ def create_app(
     @application.get('/health', response_model=HealthResponse, tags=['健康检查'])
     async def health() -> HealthResponse:
         return HealthResponse()
+
+    @application.get('/ready', tags=['健康检查'])
+    async def ready(response: Response) -> dict[str, Any]:
+        """就绪探针：依赖（图与审计库）未就绪时返回 503，与存活探针区分。"""
+        audit = getattr(application.state, 'audit', None)
+        checks = {
+            'graph': hasattr(application.state, 'graph'),
+            'audit': bool(audit is not None and await asyncio.to_thread(audit.ping)),
+        }
+        ok = all(checks.values())
+        if not ok:
+            response.status_code = 503
+        return {'status': 'ready' if ok else 'not_ready', 'checks': checks}
 
     @application.get('/', include_in_schema=False)
     async def workbench() -> FileResponse:

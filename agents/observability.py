@@ -1,13 +1,14 @@
 """LangFuse v2与主项目0.3兼容回调；仅在显式开启后初始化。"""
 from typing import Any
 from agents.middleware_audit import TokenUsageCounter, mask_pii
+from logging_setup import GRAPH_TRACE_LOGGER
 from settings import Settings
 
 
 def tracing_config(claim_id: str, settings: Settings | None = None) -> tuple[dict[str, Any], Any]:
     cfg = settings or Settings()
     usage = TokenUsageCounter()
-    callbacks: list[Any] = [usage]
+    callbacks: list[Any] = [usage, GRAPH_TRACE_LOGGER]
     handler = None
     if cfg.langfuse_enabled:
         from langfuse.callback import CallbackHandler

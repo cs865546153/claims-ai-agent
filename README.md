@@ -1,6 +1,6 @@
 # 理赔 Agent 培训材料实现
 
-依据 `claims-langchain-training.md` 实现分层代码、演示、测试和部署配置。主项目要求Python 3.12+（当前开发环境为 Python 3.15，`pytest` 已验证通过）、LangChain 0.3.14、langchain-openai 0.2.14；官方Deep Agents单独安装。默认连接本地推理，百炼需显式选择。真实模式未配置业务适配器会转人工，不返回假保单或虚构定损。
+依据 `claims-langchain-training.md` 实现分层代码、演示、测试和部署配置。主项目要求Python 3.12+（Windows 与 macOS 的 Python 3.15 环境均已验证通过，macOS 步骤见下文「macOS 快速启动」）、LangChain 0.3.14、langchain-openai 0.2.14；官方Deep Agents单独安装。默认连接本地推理，百炼需显式选择。真实模式未配置业务适配器会转人工，不返回假保单或虚构定损。
 
 完整逐项映射及验证边界见 [实现验收清单](docs/implementation-matrix.md)；原文API与业务规则修正见 [差异记录](docs/material-differences.md)。
 
@@ -29,7 +29,224 @@ source .venv-py315/Scripts/activate
 
 > 若执行 `uvicorn ...` 报「无法将 uvicorn 识别为 cmdlet」或 `command not found`，十有八九是当前激活成了 `.venv-deep`。
 
+> 激活提示符只显示目录名，多个目录下都叫 `.venv-py315` 时看起来完全一样。用 `which python`（Windows：`Get-Command python`）确认解释器在**本项目根目录**下；例如 `My_Study/Python/.venv-py315` 是学习目录的环境，里面没有 FastAPI/uvicorn。
+
 > 旧的 `.venv-py314` / `.venv-deep` 依赖的基础解释器 Python 3.14 已从本机卸载，两个环境均已失效，请勿继续使用。需要 Deep Agents 时，用 Python 3.15 重建 `.venv-deep`（先确认 `deepagents` 支持 3.15）。
+
+## macOS 快速启动（Apple Silicon / Intel）
+
+macOS 自带的 `/usr/bin/python3` 通常是 3.9.6，**低于项目要求的 3.12**；直接执行 `pip install -r requirements.txt` 会在 `numpy==2.5.3` / `pandas==3.0.6` 处报找不到匹配版本。先装 Python 3.15，再建虚拟环境。
+
+最短路径（依赖已装好时）：
+
+```bash
+cd /Users/Song/workspace/claims-ai-agent
+bash scripts/set_deepseek_key.sh   # 首次：交互式写入 DeepSeek Key 并校验（不回显）
+bash scripts/start_mac.sh          # 启动；任意目录执行都可以，自动切根目录 + 选 venv
+# 打开 http://127.0.0.1:8001/
+```
+
+> **最容易踩的坑：同名 `.venv-py315`。** 仓库里 `My_Study/Python/` 也有一个学习用的 `.venv-py315`，激活后提示符一模一样，但里面只有 pytest/openai/rich/mypy 等，**没有 uvicorn/FastAPI**，于是报 `command not found: uvicorn`。启动前先自检：
+>
+> ```bash
+> pwd              # 必须是 .../claims-ai-agent
+> which python     # 必须是 .../claims-ai-agent/.venv-py315/bin/python
+> which uvicorn    # 找不到就说明目录或环境不对
+> ```
+
+### 1. 安装 Python 3.15
+
+uv（推荐，装到 `~/.local`，不需要 sudo）：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.15
+uv python find 3.15
+```
+
+若提示 `command not found: uv`，把安装目录加进 PATH（zsh）：
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+Homebrew：
+
+```bash
+brew install python@3.15
+# Apple Silicon: /opt/homebrew/bin/python3.15
+# Intel:        /usr/local/bin/python3.15
+```
+
+也可以下载 python.org 的 macOS universal2 安装包，装完位于 `/usr/local/bin/python3.15`。
+
+> 若 `python3.15` 不在 PATH，用完整路径建环境：`~/.local/bin/python3.15 -m venv .venv-py315`（uv 安装）或 `/opt/homebrew/bin/python3.15 -m venv .venv-py315`（Apple Silicon Homebrew）。
+
+### 2. 创建虚拟环境并安装依赖
+
+```bash
+cd /Users/Song/workspace/claims-ai-agent
+python3.15 -m venv .venv-py315
+source .venv-py315/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+用 uv 建环境也可：`uv venv --seed --python 3.15 .venv-py315`。**不要漏 `--seed`**，否则环境里没有 pip（可改用 `uv pip install -r requirements.txt`）。
+
+> 国内网络直连 pypi.org 容易超时（`ReadTimeoutError` / `NameResolutionError`），可换镜像：
+> `python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt`。
+
+说明：
+
+- Apple Silicon 原生 arm64 解释器可直接安装 arm64 wheel，不需要 Rosetta，也不需要 Xcode 编译。
+- `requirements.txt` 中 PyYAML 在 `python_version >= "3.15"` 时使用 `vendor/` 的纯 Python wheel（该标记对所有平台生效，不仅 Windows），功能一致，只是关闭 libyaml C 加速。
+- 本项目 RAG 通过 `MILVUS_URI` 连外部 Milvus，不依赖 `milvus-lite`；安装日志里没有 milvus-lite 属正常。
+
+### 3. 配置 .env（默认 DeepSeek）
+
+`.env.example` 现在默认 `MODEL_PROVIDER=deepseek`。推荐用脚本写入密钥，**不回显、不进 shell 历史**：
+
+```bash
+bash scripts/set_deepseek_key.sh
+```
+
+脚本会：创建 `.env`（若不存在）→ 提示输入 key → 设为 `MODEL_PROVIDER=deepseek` → `chmod 600` → 调 `GET /models` 校验鉴权，并检查 `DEEPSEEK_FLASH_MODEL` / `DEEPSEEK_PRO_MODEL` 是否在账号可用列表中。
+
+手工配置等价于：
+
+```bash
+cp .env.example .env && chmod 600 .env
+# 编辑 .env：
+#   MODEL_PROVIDER=deepseek
+#   DEEPSEEK_API_KEY=sk-...
+```
+
+> 没填 key 时服务会**拒绝启动**，报 `DeepSeek模式需要配置DEEPSEEK_API_KEY`——这是配置校验，不是依赖问题。
+
+其他可选 provider：
+
+| 目的 | 配置 |
+| --- | --- |
+| 默认：真实对话与单证识别 | `MODEL_PROVIDER=deepseek` + `DEEPSEEK_API_KEY` |
+| 百炼 | `MODEL_PROVIDER=bailian` + `OPENAI_API_KEY` + `QWEN_*_MODEL` |
+| 本机推理（Ollama / vLLM / LM Studio，需自备模型） | `MODEL_PROVIDER=local`，改 `LOCAL_LLM_BASE_URL` 并使 `LOCAL_*_MODEL` 与服务注册名一致 |
+| 完全不接模型，只看演示 | 保持任意 provider，直接点页面「载入演示」；对话仍不可用 |
+
+改完自检：
+
+```bash
+python -c "from settings import Settings; s=Settings(); print(s.app_env, s.business_mode, s.model_provider)"
+```
+
+> `BUSINESS_MODE=demo` 只影响案件状态机与演示入口；对话链路仍要调用模型。完全不配模型时，只有「载入演示」、健康检查和状态机可用。
+
+临时切成演示模式（macOS 的 BSD `sed` 需要 `-i ''`）：
+
+```bash
+sed -i '' 's/^BUSINESS_MODE=.*/BUSINESS_MODE=demo/' .env
+```
+
+### 4. 启动服务
+
+**推荐用启动脚本**（任意目录执行都行，会自动切到项目根目录、挑选可用 venv，并默认开启热重载）：
+
+```bash
+bash /Users/Song/workspace/claims-ai-agent/scripts/start_mac.sh              # 默认 8001，热重载开
+bash /Users/Song/workspace/claims-ai-agent/scripts/start_mac.sh 8002         # 换端口
+bash /Users/Song/workspace/claims-ai-agent/scripts/start_mac.sh --no-reload  # 关闭热重载
+```
+
+手动启动时等价于：
+
+```bash
+source .venv-py315/bin/activate
+uvicorn app:app --host 127.0.0.1 --port 8001 --reload \
+  --reload-exclude "$PWD/.venv-py315" \
+  --reload-exclude "$PWD/.git" \
+  --reload-exclude "$PWD/.data" \
+  --reload-exclude "$PWD/My_Study"
+```
+
+不激活环境也可以直接调用：
+
+```bash
+.venv-py315/bin/uvicorn app:app --host 127.0.0.1 --port 8001 --reload
+```
+
+- 工作台：<http://127.0.0.1:8001/>
+- 接口文档：<http://127.0.0.1:8001/docs>
+- 检查点库：首次启动自动创建 `.data/checkpoints.sqlite`
+- 审计库：首次启动自动创建 `.data/audit.sqlite`（只追加 + 哈希链）
+
+**热重载说明**
+
+- `--reload` 依赖 `watchfiles`（已写入 `requirements.txt`）。只有装了 watchfiles，`--reload-exclude` 才生效；否则 uvicorn 退化为 `StatReload`，会连 `.venv-py315` 里的几万个 `.py` 一起扫描。
+- 排除目录必须传**绝对路径**：uvicorn 用 `exclude_dir in path.parents` 判断，相对路径不生效（本次已踩过）。
+- 改代码后进程自动重启，`.data/checkpoints.sqlite` 在磁盘上，重启不丢案件状态；但**进行中的 SSE 请求会断开**，刷新页面重发即可。
+- 不要加 `--workers`（示例按单进程设计，SQLite + 内存锁不支持多 worker）。
+- 生产/演示验收建议 `--no-reload`，避免改文件导致服务抖动；Dockerfile 中默认即无 reload。
+
+### 5. 验证
+
+另开一个终端：
+
+```bash
+curl -fsS http://127.0.0.1:8001/health
+curl -fsS http://127.0.0.1:8001/ready
+.venv-py315/bin/python -m scripts.audit_verify --limit 5
+.venv-py315/bin/python health_check.py --url http://127.0.0.1:8001
+.venv-py315/bin/python -m pytest -q
+```
+
+`health_check.py` 只提交一条缺保单号的合成报案，校验状态机进入 `awaiting_information`，不触发模型或真实业务，因此未配置模型也能通过。
+
+也可一条命令跑完整验证（会占用 8001 端口）：
+
+```bash
+bash scripts/verify.sh                                  # 自动选 .venv-py315，其次 .venv-py314
+VENV_DIR=.venv-py315 bash scripts/verify.sh              # 或显式指定
+```
+
+> `verify.sh` 内部以**无 reload** 的固定进程启动，避免验证过程中因文件变动重启；日常开发用 `start_mac.sh` 即可。
+
+### 6. 停止与排错
+
+停止：`Ctrl+C`。端口被占用：
+
+```bash
+lsof -nP -iTCP:8001 -sTCP:LISTEN
+kill <PID>
+```
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| `No matching distribution found for numpy==2.5.3` | 用了系统 Python 3.9；按第 1、2 步重建 3.15 环境 |
+| `command not found: uvicorn` | 没激活 `.venv-py315`，或误激活了不含 uvicorn 的 `.venv-deep` |
+| `Address already in use` | 8001 被占用，`lsof` 后 kill，或改用 `--port 8002` |
+| 启动时报缺少 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | `.env` 里 provider 与 key 不匹配；运行 `bash scripts/set_deepseek_key.sh` 或手工补 key |
+| 对话报 `APIConnectionError`（阶段 classification） | 当前 provider 的模型服务不可达：`local` 需 127.0.0.1:8000 有推理服务；`deepseek` 检查网络与 `DEEPSEEK_BASE_URL` |
+| 对话报 `AuthenticationError` / HTTP 401 | DeepSeek key 无效或未生效；重新写入 key 后**重启**服务 |
+| 页面能打开，对话返回 503 | 本地模型地址不可达或模型名不匹配；查看 uvicorn 日志与 trace |
+| 单证识别 502/503 | 所选模型不支持多模态，或未按 JSON 返回 |
+| 安装/运行时报架构错误 | 混用了 Rosetta（`arch -x86_64`）与 arm64 解释器；删除 venv 重建 |
+| `xcrun: error` | `xcode-select --install`；绝大多数依赖有 wheel，一般用不到 |
+| `ReadTimeoutError` / `NameResolutionError` / `from versions: none` | 访问 pypi.org 超时或被解析失败；改用国内镜像：`python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt` |
+| 已激活 `(.venv-py315)` 但仍 `command not found: uvicorn` | 当前目录不是项目根目录。`My_Study/Python/` 下也有同名 `.venv-py315`（学习环境，无 FastAPI/uvicorn）；`pwd` 确认后 `cd` 回项目根目录，或用 `bash scripts/start_mac.sh` |
+| 改代码后没有自动重启 | ① 未安装 `watchfiles`（`pip install -r requirements.txt`）；② 启动时带了 `--no-reload`；③ 改的是排除目录（`.venv*`、`.data`、`My_Study`）里的文件 |
+| 一改代码就重启、CPU 很高 | `--reload-exclude` 未生效，通常是传了相对路径；改用 `scripts/start_mac.sh`，它传的是绝对路径 |
+
+### 7. 可选：Docker
+
+```bash
+cp .env.example .env      # 已存在则跳过
+docker compose up -d --build
+```
+
+Apple Silicon 上应用容器为 arm64。若 `--profile infra` 的 Milvus 拉不到 arm64 镜像，可对这些服务单独使用 `--platform linux/amd64`，或只启动 `app` 并指向外部 Milvus。
+
+> 本机验证（macOS 14.8.2 / Apple Silicon / Python 3.15.1）：`pip check` 无冲突，`pytest` 为 **145 passed, 1 skipped**（跳过项需真实 Milvus），`uvicorn app:app` 启动后 `/health`、`health_check.py` 均通过。国内网络安装依赖时请使用上面的清华镜像。
 
 ## 结构与职责
 
@@ -49,8 +266,10 @@ claims-agent-app/
 │   ├── risk_agent.py           # 结构化专家意见与本地模型调用
 │   ├── confidence.py           # Softmax/熵/贝叶斯/融合/温度/ECE
 │   ├── memory.py               # 窗口、摘要、实体冲突与Redis持久化
-│   ├── middleware_audit.py     # 脱敏、限流、缓存、重试、审计、Token统计
-│   ├── middleware.py           # 中间件公共入口
+│   ├── middleware_audit.py     # 模型层：脱敏、限流、缓存、重试、审计、Token统计
+│   ├── http_middleware.py      # 接入层：请求ID、认证、限流、审计、异常兜底（ASGI）
+│   ├── audit_store.py          # 审计库：append-only + 哈希链（SQLite，可换Postgres）
+│   ├── middleware.py           # 中间件公共入口（两层统一导出）
 │   ├── observability.py        # LangFuse v2嵌套追踪和脱敏回调
 │   └── deep_claims_agent.py    # 独立Deep Agents环境的延迟入口
 ├── tools/                      # 八类业务工具及模型、检索、回写能力
@@ -70,7 +289,7 @@ claims-agent-app/
 ├── tests/                      # 单元、SDK协议、状态机、HTTP与可选Milvus集成
 ├── demos/                      # 参数/消息/本地接口/LangFuse演示及Mermaid源码
 ├── isolated_deep/              # 官方Deep Agents独立依赖、运行时和测试
-├── scripts/                    # 安装验证、解析基准与Schema迁移
+├── scripts/                    # 安装验证、一键启动、DeepSeek密钥写入、审计链校验、解析基准与Schema迁移
 ├── deploy/                     # 对拍、门禁、环境配置、监控告警和运维手册
 ├── monitoring.py               # Prometheus六组业务指标
 ├── health_check.py             # 三条HTTP健康与状态机验证
@@ -86,6 +305,8 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 > `claims_platform/` 原名 `platform/`，与标准库同名会遮蔽 `platform` 模块，导致 `coverage`、`setuptools` 等直接报 `module 'platform' has no attribute ...`。已重命名为 `claims_platform/`，并同步更新 `scripts/eval_intent.py` 与 `tests/test_intent_*.py` 的导入；新增代码不要再用 `platform` 作为包名。
 
 > 注：`My_Study/` 为个人学习测试目录，不属于本项目实现，可忽略。
+
+> 分层组件图与各链路时序见 [demos/完整链路图.md](demos/完整链路图.md)；部署视图见 [demos/本地部署架构图.md](demos/本地部署架构图.md)。
 
 ## 对话助手链路的架构演进（方案 A → 方案 B）
 
@@ -113,7 +334,7 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
 完成后两条链路（对话助手、理赔状态机）共用同一套 LangGraph + checkpointer + interrupt 模式。
 
-## 安装和离线验证
+## 安装和离线验证（Windows；macOS 见上文「macOS 快速启动」）
 
 在项目根目录执行。项目要求 Python 3.12+；当前开发环境为 Python 3.15（Windows 无需 C 编译器）。`requirements.txt` 为精确锁定版本，完整冻结见 `requirements-py315.lock.txt`；历史版本保留在 `requirements-py314.lock.txt`（Python 3.14）与 `requirements-legacy-py312.lock.txt`（Python 3.12）。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务。
 
@@ -128,7 +349,7 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 | PyYAML | 6.0.3 | 6.0.3（纯 Python wheel） | 官方无 cp315 wheel，见 `vendor/` |
 | ruff | 0.9.10 | 不变 | 自带 `py3-none-win_amd64` wheel |
 
-> 验证结果：`pip check` 无依赖冲突；`pytest` 为 **125 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例）。
+> 验证结果：`pip check` 无依赖冲突；本轮测试集在 macOS 上为 **145 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例），Windows 未在本轮复测。
 
 Windows（PowerShell）：
 
@@ -162,7 +383,7 @@ python -m demos.module04_demo --prompts
 python -m scripts.benchmark_parsers
 ```
 
-Linux/macOS 只需把激活路径换成 `bin/`：
+Linux/macOS 只需把激活路径换成 `bin/`；macOS 完整步骤（含 Python 3.15 安装、演示模式与排错）见上文 [macOS 快速启动](#macos-快速启动apple-silicon--intel)：
 
 ```bash
 python3.15 -m venv .venv-py315
@@ -196,10 +417,32 @@ curl -fsS http://127.0.0.1:8001/health
 python health_check.py
 ```
 
+macOS / Linux：
+
+```bash
+source .venv-py315/bin/activate
+uvicorn app:app --host 127.0.0.1 --port 8001 --reload
+# 另一个终端
+curl -fsS http://127.0.0.1:8001/health
+python health_check.py --url http://127.0.0.1:8001
+```
+
+macOS 推荐直接用启动脚本（自动切到项目根目录、自动选 venv，默认开热重载并排除 `.venv*`/`.data`/`My_Study`）：
+
+```bash
+bash scripts/start_mac.sh              # 默认 8001，热重载开
+bash scripts/start_mac.sh 8002         # 指定端口
+bash scripts/start_mac.sh --no-reload  # 关闭热重载
+```
+
 若不激活环境，也可直接用主环境解释器启动：
 
 ```powershell
 .\.venv-py315\Scripts\uvicorn.exe app:app --host 127.0.0.1 --port 8001
+```
+
+```bash
+.venv-py315/bin/uvicorn app:app --host 127.0.0.1 --port 8001
 ```
 
 启动后访问 `http://127.0.0.1:8001/` 使用理赔智能助手。页面采用普通对话形式，支持多轮意图识别、PDF/DOCX/文本抽取、图片视觉识别，以及结合识别结果的流式问答。点击“载入演示”可用固定合成案件运行完整状态机，查看报案、保单、三专家、置信度和决策链路；该入口不调用真实业务系统，生产环境自动禁用。分类器读取最近六条消息和上一轮意图：省略主语的追问继承当前主题，明确的新问题允许切换主题。材料审核会按附件类型核查保单信息、事故/出险证明和费用/损失凭证；缺失时保留累计附件并最多回流追问三轮，仍不完整则建议转人工，材料补齐后轮次清零并继续理赔链路。五类理赔意图进入理赔专用提示和合规约束；一般咨询交给通用基模回答。附件仅在请求内存中处理，不落盘；图片识别要求配置的模型支持 OpenAI 兼容多模态消息。
@@ -209,6 +452,7 @@ python health_check.py
 | 路由 | 行为 |
 | --- | --- |
 | GET /health | 仅进程存活，不代表模型可用 |
+| GET /ready | 就绪探针：检查理赔图与审计库，未就绪返回 503 |
 | POST /api/claims/process | 创建审核工作流；缺保单号进入补材料中断 |
 | POST /api/demo/claims/process | 用固定合成案件运行完整理赔状态机；仅非生产环境 |
 | GET /api/claims/{claim_id} | 查询已持久化案件状态 |
@@ -222,11 +466,42 @@ python health_check.py
 
 请求支持description或claim_text，以及可选policy_id、amount。返回的是审核建议，不执行支付。SQLite检查点保存在`.data/checkpoints.sqlite`，重启可恢复。拒赔需授权人工提供条款依据；低置信度、证据不足和大额转人工。生产必须配置CLAIMS_API_KEY和REVIEWER_API_KEY；示例不支持多租户行级权限，也不能直接横向扩容。
 
+## 接入层中间件（认证 / 限流 / 审计）
+
+所有 HTTP 请求先经过一条纯 ASGI 管线（`agents/http_middleware.py`），新增路由自动继承，不需要在每个 handler 里重复实现：
+
+```text
+CORS → RequestID → 认证 → 请求体上限 → 限流 → 审计 → 业务处理 → 异常兜底
+```
+
+| 能力 | 行为 | 配置 |
+| --- | --- | --- |
+| 请求 ID | 接受合法 `X-Request-ID`（8–64 位 `[A-Za-z0-9._-]`），否则生成 UUID；响应头回传，日志与审计可串联 | — |
+| 认证 | `/api/*` 除 `/api/demo/*` 外由接入层校验 `X-API-Key`（未配置时开发放行，生产启动即失败）；审核类接口另需 `X-Reviewer-Key` | `CLAIMS_API_KEY`、`REVIEWER_API_KEY` |
+| 请求体上限 | 超过上限直接 413，不进入业务 | `HTTP_MAX_BODY_BYTES`（默认 64MB） |
+| 限流 | 按「身份 + 来源 IP + 接口类别」分桶，流式与单证接口独立配额；超限返回 429 + `Retry-After` | `HTTP_RATE_LIMIT_PER_MINUTE`（1200）、`HTTP_STREAM_RATE_LIMIT_PER_MINUTE`（120）、`HTTP_DOCUMENT_RATE_LIMIT_PER_MINUTE`（120）、`HTTP_RATE_LIMIT_ENABLED` |
+| 审计 | 每条业务请求落库：request_id、身份、状态码、耗时、脱敏入参、IP 哈希；只追加 + 哈希链，可检测篡改 | `CLAIMS_AUDIT_DB`（默认 `.data/audit.sqlite`，测试用 `:memory:`） |
+| 异常兜底 | 未处理异常返回 500 JSON + request_id，不返回堆栈；SSE 已开始输出时不重复写响应 | — |
+
+审计脱敏在落库前统一执行：手机号、身份证、银行卡等替换为占位符。请求体只在 JSON 且不超过 64KB 时截取摘要，不落原始文件、不落 `X-API-Key`。
+
+```bash
+python -m scripts.audit_verify --limit 10   # 校验哈希链，退出码 0 = 完整
+```
+
+`/health` 只表示进程存活；`/ready` 额外检查理赔图与审计库可用，未就绪返回 503，适合作为 K8s readiness 或负载均衡摘流依据。
+
+> 本中间件是**接入层**；三专家模型调用仍有独立的 `MiddlewareChain`（脱敏、按案限流、缓存、熔断重试、HITL 标记），两层分工见 [docs/platform-architecture-workflow.md](docs/platform-architecture-workflow.md) §2.3。
+>
+> 限流与审计当前是**单进程**实现（内存桶 + SQLite）。多副本部署前需把限流换 Redis、审计换 Postgres/ClickHouse + WORM；两者接口已隔离，替换不侵入业务代码。
+
 ## 本地模型与可选云端
 
-MODEL_PROVIDER默认local，使用LOCAL_LLM_BASE_URL/API_KEY和LOCAL_FAST/MAIN/PRO/VISION_MODEL。名称必须与推理服务实际注册名一致。本地服务端口默认8000，应用端口8001。
+`.env.example` 默认 `MODEL_PROVIDER=deepseek`，即开箱走 DeepSeek；必须提供 `DEEPSEEK_API_KEY`，否则启动时配置校验失败。少量调试可直接用 `bash scripts/set_deepseek_key.sh` 写入并验证，脚本会检查 key 是否有效、`DEEPSEEK_FLASH_MODEL`/`DEEPSEEK_PRO_MODEL` 是否在账号可用列表中。
 
-设置MODEL_PROVIDER=bailian时使用OPENAI_BASE_URL/API_KEY及QWEN_*_MODEL；已有百炼密钥无需删除，但不会自动用于本地模式。三个qwen别名分别映射通用、强推理、轻量模型。
+代码内置缺省（无 `.env` 时）仍是 `local`：使用 LOCAL_LLM_BASE_URL/API_KEY 和 LOCAL_FAST/MAIN/PRO/VISION_MODEL，名称必须与推理服务实际注册名一致。本地服务端口默认8000，应用端口8001。设置 `MODEL_PROVIDER=local` 可切回本机推理（需自备模型：Ollama / vLLM / LM Studio）。
+
+设置MODEL_PROVIDER=bailian时使用OPENAI_BASE_URL/API_KEY及QWEN_*_MODEL；已有百炼密钥无需删除，但不会自动用于其他模式。三个qwen别名分别映射通用、强推理、轻量模型。
 
 设置MODEL_PROVIDER=deepseek时使用DEEPSEEK_BASE_URL/API_KEY及DEEPSEEK_FLASH_MODEL/DEEPSEEK_PRO_MODEL；默认base_url为`https://api.deepseek.com`，flash映射通用/轻量/视觉档位，pro映射强推理档位。DeepSeek思考模式默认关闭（DEEPSEEK_THINKING=false），因为推理token计入max_tokens且会削弱确定性；需要更强推理时设为true。DeepSeek不提供embedding接口，RAG仍需单独配置EMBEDDING_*。
 

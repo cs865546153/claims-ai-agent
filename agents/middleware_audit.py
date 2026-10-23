@@ -212,9 +212,10 @@ class MiddlewareChain:
 
 
 def configure_logging(path: str | None = None) -> None:
-    """日志只收集应用审计，外部SDK保持WARNING以免泄露请求内容。"""
-    handler = logging.FileHandler(path, encoding='utf-8') if path else logging.StreamHandler()
-    handler.setFormatter(logging.Formatter('%(message)s'))
-    LOGGER.handlers = [handler]
-    LOGGER.setLevel(logging.INFO)
-    LOGGER.propagate = False
+    """兼容旧入口：统一交给 logging_setup 配置根日志器。
+
+    原实现只给 ``claims.audit`` 挂 handler，其他 logger 的 INFO 会被丢弃；
+    现由 ``logging_setup`` 统一设置级别、格式、可选文件输出与请求 ID 串联。
+    """
+    from logging_setup import configure_logging as _configure_logging
+    _configure_logging(path)

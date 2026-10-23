@@ -1,8 +1,8 @@
-# 理赔 AI Agent 平台：架构与工作流
+# AI Agent 平台：架构与工作流
 
-> 版本：v0.1  
-> 适用范围：当前仓库的理赔对话、理赔案件，以及规划中的投资 / 通用领域。  
-> 标记说明：`[现有]` 表示当前代码已有；`[新增]` 表示本次已落地；`[规划]` 表示设计已定，尚未接入。
+> 版本：v0.2（2026-10）  
+> 适用范围：当前仓库的理赔对话、理赔案件、投资域，以及规划中的统一领域路由。  
+> 标记说明：`[已落地]` 代码已实现并通过测试；`[已实现未接入]` 代码存在但主 app 未使用；`[部分]` 部分能力已实现；`[规划]` 尚未实现。
 
 ---
 
@@ -13,8 +13,8 @@
 | 医院 | 系统 |
 |---|---|
 | 前台 | FastAPI 接入层 |
-| 分诊台 | `IntentRouter` 意图路由 |
-| 科室 | `DomainPlugin`：claims / investment / general |
+| 分诊台 | `IntentRouter` 意图路由（目标态；当前为图内 `classify`） |
+| 科室 | `DomainPlugin`（目标态；当前为三张图） |
 | 医生问诊、检查 | LangGraph 图执行 |
 | 化验、影像、会诊 | RAG、三专家并行、工具调用 |
 | 主任复核 | HITL 人工审核 |
@@ -27,80 +27,179 @@
 科室才是业务，底层系统负责可扩展。
 ```
 
+补充：当前代码**还没有统一分诊台**。对话链路在 `assistant_agent.classify` 节点内分诊；理赔和投资接口直接进入各自图；`IntentRouter` 已实现，但主 app 尚未接入。
+
 ---
 
 ## 1. 分层架构图
 
+> 先分清两张图：**1.1 是当前代码（v0.2）**；**1.3 是目标态**（统一 IntentRouter + DomainPlugin + Capability SPI）。1.2 是当前组件职责表。
+> 当前主 app 还没有接入 `IntentRouter`，不要按 1.3 的“统一分诊”去理解现有请求。
+
+### 1.1 当前落地架构（v0.2）
+
+```mermaid
+flowchart TB
+    U["用户 / Web / App"]
+    subgraph ACCESS["接入层（每个 HTTP 请求）"]
+        CORS["CORS"]
+        MW["EnterpriseHttpMiddleware<br/>RequestID → 认证 → 体积上限 → 限流 → 审计 → 500 兜底"]
+    end
+    subgraph ROUTES["HTTP 路由 app.py（静态 URL，无模型判断）"]
+        R1["/api/assistant/stream"]
+        R2["/api/claims/*"]
+        R3["/api/investment/*"]
+        R4["/api/documents/analyze"]
+        R5["/health · /ready · /metrics"]
+    end
+    subgraph ORCH["编排层 LangGraph"]
+        A1["assistant_agent<br/>classify → policy_query / material_gate / formal_review / investment_trade"]
+        A2["claim_agent<br/>intake → policy → experts → route_decision"]
+        A3["investment_agent<br/>intake → context → risk → advise / review → execute"]
+    end
+    subgraph MODEL["模型调用层"]
+        MC["MiddlewareChain（仅三专家）<br/>脱敏 · 按案限流 · 缓存 · 熔断/降级 · HITL 标记"]
+        MO["模型档位<br/>flash / plus / max·pro / vision"]
+    end
+    subgraph SERVICE["服务与适配"]
+        S1["WorkflowServices<br/>policy · verify · expert"]
+        S2["InvestmentServices<br/>组合诊断 · 交易提交"]
+        S3["RAG 条款检索 / 置信度聚合"]
+        AD1["BusinessBackend / DemoBackend"]
+        AD2["InvestmentBackend / Demo"]
+        AD3["Outbox"]
+    end
+    subgraph DATA["数据与观测"]
+        D1[("checkpoints.sqlite")]
+        D2[("audit.sqlite<br/>只追加 + 哈希链")]
+        D3[("policies.sqlite")]
+        D4[("outbox.sqlite")]
+        D5[("Redis / Milvus（可选）")]
+        O1["Prometheus / LangFuse / stdout JSON"]
+    end
+    U --> CORS --> MW
+    MW --> R1
+    MW --> R2
+    MW --> R3
+    MW --> R4
+    MW --> R5
+    R1 --> A1
+    R2 --> A2
+    R3 --> A3
+    R4 --> MO
+    R5 --> D2
+    A1 -->|"外层流式回答"| MO
+    A1 --> S1
+    A2 --> S1
+    A2 --> MC
+    A3 --> S2
+    A1 --> S3
+    A2 --> S3
+    MC --> MO
+    S1 --> AD1
+    S2 --> AD2
+    A2 -.->|"规划：回写"| AD3
+    AD1 --> D3
+    AD3 --> D4
+    A2 --> D1
+    A3 --> D1
+    S3 -.-> D5
+    MW --> D2
+    MW --> O1
+    A1 -.-> O1
+    A2 -.-> O1
+```
+
+### 1.2 组件职责
+
+| 层 | 组件 | 职责 | 代码位置 |
+| --- | --- | --- | --- |
+| 接入 | `EnterpriseHttpMiddleware` | 请求 ID、认证、体积上限、限流、审计、500 兜底；新增路由自动继承 | `agents/http_middleware.py` |
+| 接入 | `AuditStore` | 只追加审计 + 哈希链，`verify_chain()` 检测篡改 | `agents/audit_store.py` |
+| 路由 | `app.py` | 静态 URL 路由：assistant / claims / investment / documents / demo / 探针 | `app.py` |
+| 编排 | `assistant_agent` | 对话图：`classify`、材料门控、保单查询、正式核赔、投资转交 | `agents/assistant_agent.py` |
+| 编排 | `claim_agent` | 理赔状态机：`intake`、`policy`、三专家、`route_decision`、HITL | `agents/claim_agent.py` |
+| 编排 | `investment_agent` | 投资图：组合诊断、风险评估、二次确认、审批、执行 | `agents/investment_agent.py` |
+| 模型 | `MiddlewareChain` | 只包三专家：脱敏、按案限流、缓存、熔断/重试、降级、HITL 标记 | `agents/middleware_audit.py` |
+| 模型 | 模型档位 | flash / plus / max·pro / vision | `config.py` |
+| 服务 | `WorkflowServices` | 理赔的 `policy` / `verify` / `expert` | `agents/claim_agent.py` |
+| 服务 | `InvestmentServices` | 组合查询、产品、交易提交 | `agents/investment_agent.py`、`adapters/investment.py` |
+| 服务 | RAG / 置信度 | 条款混合检索与引用校验；三专家置信度聚合 | `tools/rag_retrieval.py`、`agents/confidence.py` |
+| 适配 | `BusinessBackend` / `DemoBackend` | 真实核心系统 / 合成保单 | `adapters/business.py` |
+| 适配 | `InvestmentBackend` / `Demo` | 真实券商适配器 / 合成组合 | `adapters/investment.py` |
+| 适配 | `Outbox` | 幂等键 + 租约 + 对账；组件已实现，**主图尚未注入**；入队 ≠ 付款 | `tools/claim_write_producer.py` |
+| 数据 | SQLite 数据文件 | `checkpoints` / `audit` / `policies`；`outbox` 由调用方指定路径 | `.data/*.sqlite` |
+| 数据 | Redis / Milvus | 会话历史（组件已实现，主 app 未接入）/ 条款向量 | `agents/memory.py`、`tools/rag_retrieval.py` |
+| 观测 | Prometheus / LangFuse / 日志 | 指标、追踪、stdout JSON | `monitoring.py`、`agents/observability.py` |
+| 探针 | `/health` / `/ready` | 存活 / 图与审计库就绪 | `app.py` |
+
+### 1.3 目标态分层（v0.3+，规划）
+
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
 │ 用户 / Web / App                                                   │
-│  发消息、上传材料、查进度、发起交易                                 │
 └───────────────────────────────┬────────────────────────────────────┘
                                 │ HTTPS / SSE
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 1. 接入层 [现有]                                                   │
-│    FastAPI app.py                                                  │
-│    ├─ /api/assistant/stream   对话流式入口                         │
-│    ├─ /api/claims/*           理赔案件接口                         │
-│    └─ SSE / JSON                                                  │
+│ 1. 接入层 [已落地]                                                  │
+│    FastAPI app.py + EnterpriseHttpMiddleware                        │
+│    RequestID → 认证 → 体积上限 → 限流 → 审计 → 500 兜底             │
+│    /api/assistant/stream · /api/claims/* · /api/investment/*        │
 └───────────────────────────────┬────────────────────────────────────┘
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 2. 中间件链 [现有]                                                 │
-│    Auth → RateLimit → PII Mask → Cache → Audit → HITL Gate         │
+│ 2. 横切能力 [部分落地]                                              │
+│    接入层：审计库（哈希链）                                          │
+│    模型层：MiddlewareChain（脱敏 / 按案限流 / 缓存 / 降级）           │
+│    HITL：LangGraph interrupt + review 接口（不是 HTTP 中间件）        │
 └───────────────────────────────┬────────────────────────────────────┘
                                 │ IntentRequest
-                                │ message / history / active_domain / attachments
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 3. 意图路由 [新增]                                                 │
-│    IntentRouter / HybridIntentClassifier                           │
-│    ├─ shadow（默认）：LLM 主路由 + JEV 影子                        │
-│    ├─ hybrid：JEV 主路由 + LLM 兜底                                │
-│    └─ 输出 RouteDecision                                           │
-│         domain / intent / confidence / margin / 是否澄清           │
+│ 3. 意图路由 [已实现，未接入主 app]                                   │
+│    IntentRouter / HybridIntentClassifier                            │
+│    shadow：LLM 主 + JEV 影子；hybrid：JEV 主 + LLM 兜底              │
+│    输出 RouteDecision：domain / intent / confidence / margin         │
 └───────────────────────────────┬────────────────────────────────────┘
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 4. 领域注册 [新增]                                                 │
-│    DomainRegistry ← configs/domains.yaml                           │
-│    校验：domain、intent 必须存在                                   │
+│ 4. 领域注册 [已实现，未接入主 app]                                   │
+│    DomainRegistry ← configs/domains.yaml                            │
 └───────────────────────────────┬────────────────────────────────────┘
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 5. 领域插件 [部分现有 / 部分规划]                                  │
-│                                                                    │
-│  ClaimsPlugin          InvestmentPlugin        GeneralPlugin       │
-│  ├─ 理赔对话图          ├─ 组合诊断图           └─ 一般问答图       │
-│  ├─ 理赔案件状态机      ├─ 风险评估图                               │
-│  ├─ 三专家并行          ├─ 产品查询图                               │
-│  └─ RAG + HITL          └─ 交易指令图 + HITL                        │
+│ 5. 领域实现 [部分落地，插件化封装规划]                               │
+│    理赔：assistant_agent + claim_agent                              │
+│    投资：investment_agent                                           │
+│    通用：assistant 的 answer 分支                                   │
+│    DomainPlugin 统一封装 [规划]                                     │
 └───────────────────────────────┬────────────────────────────────────┘
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 6. 图执行 [现有]                                                   │
-│    LangGraph：节点编排 / 条件边 / 并行 / 工具 / RAG                 │
-│    Checkpointer：保存会话与案件状态                                 │
+│ 6. 图执行 [已落地]                                                   │
+│    LangGraph：节点编排 / 条件边 / 并行 / 工具 / RAG                  │
+│    Checkpointer：checkpoints.sqlite                                 │
 └───────────────────────────────┬────────────────────────────────────┘
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 7. 能力层 Capability SPI [接口新增，外部实现规划]                  │
-│    StateStore / TaskQueue / Lock / RateLimiter / EventBus / Outbox  │
-│    ObjectStore / VectorStore / Audit / HITL / ModelGateway          │
+│ 7. 能力层 Capability SPI [接口设计，未落地]                          │
+│    StateStore / TaskQueue / Lock / RateLimiter / EventBus / Outbox   │
+│    ObjectStore / VectorStore / Audit / HITL / ModelGateway           │
 └───────────────────────────────┬────────────────────────────────────┘
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 8. 输出与观测                                                      │
-│    SSE/JSON 回复 → 用户                                            │
-│    Outbox 事件 → Kafka/DB/重试 [规划]                              │
-│    Langfuse / Metrics / 审计日志 [现有/规划]                       │
+│ 8. 输出与观测 [部分落地]                                             │
+│    SSE/JSON → 用户 · Outbox（SQLite，未接 Kafka）                    │
+│    LangFuse / Prometheus / stdout 审计                               │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 2. 端到端工作流
+
+> 2.1–2.3 是**目标态**工作流（统一 IntentRouter + DomainPlugin）；当前代码的实际路径见 **2.4**。
 
 ```text
 用户
@@ -115,8 +214,10 @@
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ 3. 中间件链                                                   │
-│    Auth → RateLimit → PII Mask → Cache → Audit → HITL Gate   │
+│ 3. 横切能力                                                   │
+│    接入层：Auth → RateLimit → Audit（全局）                    │
+│    模型层：PII Mask → Cache → 熔断/降级（仅专家调用）          │
+│    HITL：LangGraph interrupt（不是 HTTP 中间件）               │
 └──────────────────────────┬───────────────────────────────────┘
                            │ IntentRequest
                            ▼
@@ -171,6 +272,8 @@ RouteDecision ──判断──┤
                         └─ 高风险、长事务 ──▶ 案件链路（状态机，HITL）
 ```
 
+> 当前代码还没有 RouteDecision 级别的统一分叉：按 URL 分成 `/assistant/*`、`/claims/*`、`/investment/*` 三条链路，见 2.4。
+
 例如：
 
 ```text
@@ -180,12 +283,12 @@ RouteDecision ──判断──┤
 “帮我把基金赎回”              → 高风险，案件模式 + 人工审批
 ```
 
-### 2.2 一次请求的十步
+### 2.2 一次请求的步骤（目标态）
 
 ```text
 1. 用户发消息，或上传材料
 2. FastAPI 接收，建立 SSE 流
-3. 中间件做鉴权、限流、PII 脱敏、缓存、审计
+3. 接入层做请求 ID、鉴权、限流、体积限制、审计；模型层再做脱敏与缓存
 4. 组装 IntentRequest：
       message / history / active_domain / attachments
 5. IntentRouter 判断：
@@ -204,123 +307,176 @@ RouteDecision ──判断──┤
 11. 审计、事件、指标写入 Outbox / Langfuse / 日志
 ```
 
+### 2.3 中间件链：实现映射（v0.2）
+
+上面架构图里的 `Auth → RateLimit → PII Mask → Cache → Audit → HITL Gate`，现在拆成**两层**落地：
+
+```text
+【接入层】EnterpriseHttpMiddleware（每个 HTTP 请求，新增路由自动继承）
+   RequestID → 认证 → 体积限制 → 限流 → 审计开始 → 业务 → 审计结束/异常兜底
+   代码：agents/http_middleware.py
+
+【模型调用层】MiddlewareChain（只包住三专家的 LLM 调用）
+   脱敏 → 按案限流 → 缓存 → 熔断/重试/降级 → 输出护栏 → HITL 标记 → 审计
+   代码：agents/middleware_audit.py
+```
+
+| 能力 | 接入层（全局） | 模型层（专家调用） |
+| --- | --- | --- |
+| 认证 | 接入层强制 `X-API-Key`；`X-Reviewer-Key` 由审核类接口校验；`/api/demo/*` 与探针公开 | — |
+| 限流 | 按「身份 + 来源 IP + 接口类别」分桶：通用 1200/min、流式 120/min、单证 120/min | 每案件 10 令牌、1/s |
+| 脱敏 | 审计落库前统一 `mask_pii`，日志只存 IP 哈希 | 输入/输出/缓存值全部脱敏 |
+| 审计 | append-only + 哈希链（`agents/audit_store.py`），记录 request_id/状态/耗时/脱敏入参 | stdout JSON 明细 |
+| 缓存 | —（暂不做 HTTP 级缓存） | 进程内 TTL，key = 案件 + 输入 + 模型参数 |
+| HITL | — | 打 `requires_manual_review` 标记 |
+| 真正 HITL 闸门 | LangGraph `interrupt()` + `/api/claims/{id}/review` / `/api/investment/{id}/review` + 审核员密钥 | — |
+| 异常兜底 | 未处理异常返回 500 + request_id，不泄露堆栈 | 3 次重试后切 `fast` 模型并标记 `degraded` |
+
+审计验证：
+
+```bash
+python -m scripts.audit_verify --limit 10    # 退出码 0 = 链完整
+```
+
+尚未覆盖（后续版本）：Redis 分布式限流、Postgres 审计、语义缓存、多租户、策略中心（OPA）。
+接入层限流与审计缓存都在单进程内，多副本部署前必须外置。
+
+### 2.4 当前实际请求路径（v0.2）
+
+```text
+/api/assistant/stream
+  → 接入层（RequestID / 认证 / 限流 / 审计）
+  → build_assistant_graph
+  → classify（flash：意图 + 保单号）
+      ├─ 一般咨询 / 投资咨询 → 外层流式回答（plus）
+      ├─ 保单查询 → policy_query → 结束
+      ├─ 交易指令 → investment_trade → 结束（安全拦截，不执行下单）
+      └─ 其他理赔意图 → material_gate
+            ├─ 缺材料 → follow_up（最多 3 轮）
+            └─ 齐全 → formal_review → 外层流式回答
+
+/api/claims/process
+  → 接入层
+  → 理赔状态机：intake → policy → experts → route_decision
+
+/api/investment/process
+  → 接入层
+  → 投资图：intake → context → risk → advise
+       └─ 交易指令：intake（二次确认 interrupt）→ risk → review（人工审批 interrupt）→ execute / rejected
+```
+
+三条链路的关键差异：
+
+| 链路 | 是否经过 IntentRouter | 当前分诊方式 | 状态 |
+| --- | --- | --- | --- |
+| 对话 `/api/assistant/stream` | 否 | 图内 `classify` 节点（flash） | 无 checkpointer，历史由前端回传 |
+| 理赔 `/api/claims/*` | 否 | URL 直接进入状态机 | `AsyncSqliteSaver` + `interrupt` |
+| 投资 `/api/investment/*` | 否 | URL 直接进入投资图 | checkpointer + 二次确认/审批 |
+
 ---
 
 ## 3. 理赔对话链路（当前实际）
 
 ```text
-用户消息
+用户消息（+ 附件 + 历史）
   │
   ▼
 /api/assistant/stream
-  │
+  │  接入层：RequestID / 认证 / 限流 / 审计
   ▼
 build_assistant_graph
   │
   ▼
-classify（识别理赔意图）
+classify（flash：意图 + 保单号 + 置信度）
   │
-  ├─ 理赔报案 / 材料审核 / 补充材料
-  │       │
-  │       ▼
-  │   material_gate
-  │       ├─ 材料齐全 ──▶ 业务处理 / RAG / 工具
-  │       └─ 材料缺失 ──▶ 生成补件清单
-  │
-  ├─ 进度查询 / 保单查询 / 条款咨询
-  │       └─▶ 查询工具 / 条款 RAG
-  │
-  ▼
-formal_review（正式性 / 合规复核）
-  │
-  ▼
-SSE 流式返回
+  ├─ 一般咨询 / 投资咨询 ──▶ END（外层流式回答）
+  ├─ 保单查询 ──▶ policy_query ──▶ END（保单摘要 / 反问保单号）
+  ├─ 交易指令 ──▶ investment_trade ──▶ END（拦截直接下单，提示二次确认/审批）
+  └─ 其他理赔意图 ──▶ material_gate
+        ├─ 材料齐全 ──▶ formal_review ──▶ END（正式核赔 + 外层流式回答）
+        └─ 材料缺失 ──▶ follow_up ──▶ END（追问，最多 3 轮）
 ```
 
 这条链路的特点是：
 
-- **轻量、同步 / 流式、低风险**
-- 主要解决“问、查、引导、补件提示”
-- 当前 `app.py` 仍然走这条链路里的 `classify` 节点
-- 目标态下，`classify` 会由新的 `IntentRouter` 接管或前置
+- **轻量、同步 / 流式、低风险**，主要解决“问、查、引导、补件提示”
+- `classify` 是当前唯一的分诊点；`IntentRouter` 尚未接入主 app
+- `formal_review` 不是只做合规复核：它会查保单、核验、并行调用三专家并执行 `route_decision`，但**不写案件检查点、不触发 interrupt**，结果直接作为对话回答
+- 图只产出决策与上下文，SSE 流式回答由外层执行器负责
+- 无 checkpointer，历史与材料轮次由前端回传；目标态（方案 B）再改为后端持久化
 
 ---
 
 ## 4. 理赔案件链路（当前实际）
 
 ```text
-创建 / 提交案件
-  │
+POST /api/claims/process
+  │  接入层：认证 / 限流 / 审计
   ▼
-材料接收 → OCR / 解析 → 完整性检查
-  │
-  ├─ 材料不全 ──▶ 通知补件 ──▶ 等待上传 ──┐
-  │                                        │
-  ▼                                        │
-三专家并行（医疗 / 责任 / 损失）           │
-  │        │        │                      │
-  └────────┼────────┘                      │
-           ▼                               │
-      结果聚合 / 交叉校验 ◀────────────────┘
-           │
-           ▼
-      route_decision
-           │
-     ┌─────┴─────┐
-     ▼           ▼
-  自动通过     转人工复核（HITL）
-     │           │
-     │           ▼
-     │      审核员：批准 / 拒绝 / 补件
-     │           │
-     └─────┬─────┘
-           ▼
-      结案 / 赔付 / 拒赔
-           │
-           ▼
-      审计 + 通知 + Outbox 事件
+intake（字段核验：claim_id / policy_id / amount）
+  ├─ 缺 policy_id ──▶ interrupt（补件）
+  │        └─ POST /api/claims/{id}/supplement ──▶ 回 intake
+  │                └─ 超过 3 轮 ──▶ review
+  └─ 有 policy_id ──▶ policy（query_policy + verify）
+        ├─ 查询 / 核验失败 ──▶ review
+        └─ 成功 ──▶ experts（Send 三专家并行）
+              ├─ damage（main / plus）
+              ├─ risk（main / plus）
+              └─ liability（pro / max）
+                    ▼
+              aggregate（置信度 = min(三专家)，风险分取 risk）
+                    ▼
+              route_decision（业务规则优先于模型分数）
+                ├─ risk > 0.7 ──▶ investigate
+                ├─ 金额 > 5 万 / 低置信 / 证据不足 ──▶ review（interrupt）
+                └─ 通过 ──▶ auto（仅受理建议；Outbox 未接入状态机）
 ```
 
 这条链路的特点是：
 
-- **重、长事务、状态机**
-- 三专家并行，结果聚合后再做路由决策
-- `route_decision` 决定自动通过还是转人工
-- HITL 是高风险场景的硬门禁
-- 意图识别不会替代案件状态机，只负责把用户引导到正确入口
+- **重、长事务、状态机**：`checkpoints.sqlite` 保存断点，重启可恢复
+- 材料完整性门禁在**对话链路**的 `material_gate`；案件状态机的前置是 `policy` 查询与核验
+- 三专家经 `MiddlewareChain`：`liability` 用 `pro`（max 模型），`damage` / `risk` 用 `main`（plus 模型），失败降级到 `fast`（flash）
+- `route_decision` 业务规则优先：高风险调查、大额 / 低置信 / 证据不足 / 拒赔建议转人工
+- HITL 通过 `interrupt()` + `/api/claims/{id}/review` + 审核员密钥，不是 HTTP 中间件
+- `auto` 只生成受理建议；`Outbox` 组件已实现但主图未注入，**入队 ≠ 付款**
 
 ---
 
-## 5. 投资链路（规划）
+## 5. 投资链路（当前已落地）
 
 ```text
-用户：基金组合怎么配置 / 帮我赎回
-  │
+POST /api/investment/process
+  │  接入层：认证 / 限流 / 审计
   ▼
-IntentRouter → investment
-  │
-  ├─ 投资咨询 / 组合诊断 / 风险评估 / 产品查询
-  │      → PortfolioGraph / RiskGraph / ProductGraph
-  │      → 行情、产品数据、RAG
-  │      → 诊断报告 + 风险提示
-  │
-  └─ 交易指令（high risk / case mode）
-         → 适当性校验
-         → 二次确认
-         → HITL 人工审批
-         → 交易适配器（券商 / 基金平台）
-         → 回执 + 审计
+investment 图
+  intake（请求校验）
+    ├─ 交易指令缺字段 ──▶ interrupt（investment_information）
+    ├─ 交易指令未确认 ──▶ interrupt（trade_confirmation）
+    │        └─ POST /api/investment/{id}/confirm
+    └─ 就绪 ──▶ context（组合 / 偏好 / 产品上下文）
+                    ▼
+                  risk（风险评估 / 适当性）
+                    ├─ 咨询 / 组合诊断 ──▶ advise（建议 + 风险提示）──▶ END
+                    └─ 交易指令 ──▶ review（interrupt：investment_review）
+                          ▼
+                    POST /api/investment/{id}/review（X-Reviewer-Key）
+                      ├─ approve ──▶ execute ──▶ END（适配器实际执行才算 executed）
+                      └─ reject / review ──▶ rejected ──▶ END（必须记录审核员与理由）
 ```
 
 投资域和理赔域共用同一套内核，但：
 
-- 咨询类意图走对话链路
-- `交易指令` 是 `high risk`，强制 `case mode`
-- 模型不能直接下单，必须经过适当性校验、二次确认和 HITL
+- 咨询类直接给建议，不进入交易审批
+- `交易指令` 必须二次确认 + 人工审批，模型不能直接下单
+- 默认 `InvestmentBackend` 未注册券商 / 基金平台适配器时，`execute` 显式失败，不会假装成功
+- `/api/demo/investment/process` 使用合成组合，仅非生产环境可用
 
 ---
 
 ## 6. 意图路由内部流程
+
+> 本节描述 `claims_platform/intent` 的设计。代码已实现并有评测脚本，但主 app 仍使用图内 `classify`，尚未接入。
 
 ### 6.1 shadow 模式（当前默认）
 
@@ -373,33 +529,43 @@ INTENT_MARGIN_THRESHOLD=0.2
 
 | 模块 | 状态 |
 |---|---|
-| `platform/intent/contracts.py` | `[新增]` 已落地：`IntentRequest`、`RouteDecision`、`DomainManifest`、`IntentClassifier` |
-| `platform/intent/registry.py` | `[新增]` 已落地：从 `configs/domains.yaml` 加载领域 |
-| `platform/intent/jev.py` | `[新增]` 已落地：JEV 适配器、脱敏、可选翻译、置信度 / 边界纠正 |
-| `platform/intent/llm.py` | `[新增]` 已落地：LLM 主路由、可选翻译器 |
-| `platform/intent/hybrid.py` | `[新增]` 已落地：主路由 + 兜底 + 影子 |
-| `platform/intent/factory.py` | `[新增]` 已落地：`shadow / hybrid / jev / llm` 四种预设 |
-| `configs/domains.yaml` | `[新增]` 已落地：claims / investment / general 三领域清单 |
-| `scripts/eval_intent.py` | `[新增]` 已落地：准确率、混淆矩阵、兜底率、影子一致性、延迟 |
-| `data/intent_golden.jsonl` | `[新增]` 已落地：中英混合合成评测集 |
-| `app.py` 接入 IntentRouter | `[规划]` 未接入，现有理赔链路保持原样 |
-| `ClaimsPlugin` 包装 | `[规划]` 待做 |
-| `Investment / General` 图实现 | `[规划]` 待做 |
+| `agents/http_middleware.py` | `[已落地]` 接入层 ASGI 管线：RequestID / 认证 / 体积 / 限流 / 审计 / 500 兜底 |
+| `agents/audit_store.py` | `[已落地]` 审计库：只追加 + 哈希链，`verify_chain()` 可检测篡改 |
+| `agents/middleware_audit.py` | `[已落地]` 模型层 `MiddlewareChain`：脱敏 / 按案限流 / 缓存 / 熔断降级 |
+| `app.py` 探针 | `[已落地]` `/health` 存活；`/ready` 检查理赔图与审计库 |
+| `agents/assistant_agent.py` | `[已落地]` 对话图：`classify` / `policy_query` / `material_gate` / `formal_review` |
+| `agents/claim_agent.py` | `[已落地]` 理赔状态机 + 三专家 + `route_decision` + HITL |
+| `agents/investment_agent.py` | `[已落地]` 投资图：组合诊断 / 风险评估 / 二次确认 / 审批 / 执行 |
+| `adapters/investment.py` | `[已落地]` 券商适配器接口 + 演示数据；真实适配器待接 |
+| `claims_platform/intent/contracts.py` | `[已实现未接入]` `IntentRequest`、`RouteDecision`、`DomainManifest`、`IntentClassifier` |
+| `claims_platform/intent/registry.py` | `[已实现未接入]` 从 `configs/domains.yaml` 加载领域 |
+| `claims_platform/intent/jev.py` | `[已实现未接入]` JEV 适配器、脱敏、可选翻译、置信度 / 边界纠正 |
+| `claims_platform/intent/llm.py` | `[已实现未接入]` LLM 主路由、可选翻译器 |
+| `claims_platform/intent/hybrid.py` | `[已实现未接入]` 主路由 + 兜底 + 影子 |
+| `claims_platform/intent/factory.py` | `[已实现未接入]` `shadow / hybrid / jev / llm` 四种预设 |
+| `configs/domains.yaml` | `[已落地]` claims / investment / general 三领域清单 |
+| `scripts/eval_intent.py` | `[已落地]` 准确率、混淆矩阵、兜底率、影子一致性、延迟 |
+| `data/intent_golden.jsonl` | `[已落地]` 中英混合合成评测集 |
+| `app.py` 接入 IntentRouter | `[规划]` 未接入，现有三条链路保持原样 |
+| `ClaimsPlugin` 统一包装 | `[规划]` 待做 |
+| `DomainPlugin` 插件化 | `[规划]` 当前按图分散实现，未抽统一接口 |
 | Redis / Celery / Kafka 等外部适配器 | `[规划]` 待做 |
-| Outbox 闭环 | `[规划]` 当前未闭环 |
+| Outbox 生产闭环 | `[部分]` SQLite 入队 / 消费 / 对账可跑；主状态机未注入，生产消费者未接 |
+| 多租户 / WORM 审计 | `[规划]` 当前审计为单机 SQLite |
 
 ### 当前状态 vs 目标
 
 | 环节 | 当前 | 目标 |
 |---|---|---|
-| 入口 | `/assistant/stream` + `/claims/*` | 统一入口 + 领域路由 |
-| 意图识别 | `assistant_agent` 内部 `classify` | `IntentRouter`（LLM/JEV/Hybrid） |
-| 领域 | 只有理赔 | claims / investment / general |
-| 状态 | 进程内 checkpointer | `StateStore` SPI（Redis/Postgres） |
+| 入口 | 对话 / 理赔 / 投资三组路由 | 统一入口 + 领域路由 |
+| 意图识别 | `assistant_agent` 内部 `classify` | `IntentRouter`（已实现，未接入） |
+| 领域 | 理赔 + 投资 + 通用问答，未插件化 | claims / investment / general 插件 |
+| 状态 | SQLite checkpointer（单机） | `StateStore` SPI（Redis/Postgres） |
 | 队列 | 同步长请求 | `TaskQueue`（Celery/Arq） |
-| 事件 | Outbox 未闭环 | `EventBus` / Outbox |
-| 模型 | 两套路由 | `ModelGateway` 统一 |
-| 观测 | Langfuse / 日志 | + 意图影子报告 / 指标 |
+| 事件 | Outbox 组件已实现，主图未注入 | `EventBus` / Outbox |
+| 模型 | 模型工厂 + 三专家 `MiddlewareChain` | `ModelGateway` 统一 |
+| 安全 | 接入层认证 / 限流 + 审计哈希链（单进程） | Redis 限流 + WORM 审计 + 多租户 |
+| 观测 | LangFuse / Prometheus / stdout | + 意图影子报告 / SLO |
 
 ---
 
@@ -444,7 +610,7 @@ TaskQueue:    Inline   → Celery / Arq / Kafka
 Lock:         InProcess→ Redis
 RateLimiter:  InProcess→ Redis
 EventBus:     InProcess→ Kafka / RabbitMQ
-Outbox:       未闭环  → DB Outbox + 重试
+Outbox:       主图未注入 → DB Outbox + 重试
 ObjectStore:  Local    → S3 / OSS
 ```
 
@@ -454,16 +620,34 @@ ObjectStore:  Local    → S3 / OSS
 
 | 路径 | 作用 |
 |---|---|
-| `app.py` | FastAPI 入口、SSE、理赔接口 |
-| `agents/assistant_agent.py` | 理赔对话图：`classify` / `material_gate` / `formal_review` |
-| `agents/claim_agent.py` | 理赔案件状态机、三专家、`route_decision` |
-| `agents/middleware_audit.py` | PII 脱敏、限流、缓存、审计、HITL |
-| `config.py` | 模型工厂与现有两套路由 |
-| `settings.py` | 环境配置，含新增的 `INTENT_*` / `JEV_*` |
-| `platform/intent/` | 新增的意图路由公共层 |
+| `app.py` | FastAPI 入口、SSE、理赔 / 投资接口、`/health` / `/ready` |
+| `agents/http_middleware.py` | 接入层 ASGI 管线：RequestID / 认证 / 体积 / 限流 / 审计 / 500 兜底 |
+| `agents/audit_store.py` | 审计库：只追加 + 哈希链 |
+| `agents/assistant_agent.py` | 对话图：`classify` / `policy_query` / `material_gate` / `formal_review` / `investment_trade` |
+| `agents/claim_agent.py` | 理赔状态机、三专家、`route_decision`、HITL |
+| `agents/investment_agent.py` | 投资图：诊断 / 风险 / 二次确认 / 审批 / 执行 |
+| `agents/middleware_audit.py` | 模型层 `MiddlewareChain`：脱敏、限流、缓存、降级、审计 |
+| `adapters/investment.py` | 投资业务适配器接口 + 演示数据 |
+| `config.py` | 模型工厂与档位（flash / plus / max·pro / vision） |
+| `settings.py` | 环境配置，含 `INTENT_*` / `JEV_*` |
+| `claims_platform/intent/` | 意图路由公共层（已实现，未接入主 app） |
 | `configs/domains.yaml` | 领域清单，单一事实源 |
 | `scripts/eval_intent.py` | 意图评测脚本 |
+| `scripts/audit_verify.py` | 审计链校验 CLI |
 | `data/intent_golden.jsonl` | 意图评测数据 |
+
+接入层相关环境变量：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `CLAIMS_API_KEY` | 空 | `/api/*` 的 API Key；生产必填 |
+| `REVIEWER_API_KEY` | 空 | 审核接口密钥；生产必填 |
+| `CLAIMS_AUDIT_DB` | `.data/audit.sqlite` | 审计库路径，`:memory:` 用于测试 |
+| `HTTP_RATE_LIMIT_ENABLED` | `true` | 是否启用接入层限流 |
+| `HTTP_RATE_LIMIT_PER_MINUTE` | `1200` | 通用接口每分钟配额 |
+| `HTTP_STREAM_RATE_LIMIT_PER_MINUTE` | `120` | 流式接口每分钟配额 |
+| `HTTP_DOCUMENT_RATE_LIMIT_PER_MINUTE` | `120` | 单证接口每分钟配额 |
+| `HTTP_MAX_BODY_BYTES` | `67108864` | 请求体上限（64MB） |
 
 > 注意：领域配置目录使用 `configs/`，不是 `config/`，避免和项目根目录的 `config.py` 同名冲突。
 
@@ -502,6 +686,9 @@ python -m scripts.eval_intent --engine jev --translate
 | Hybrid | 混合模式，主引擎 + 兜底引擎 |
 | JEV | `ateve-jev-v1` 意图识别模型 |
 | margin | 第一候选与第二候选的概率差 |
+| RequestID | 每个请求的追踪 ID，响应头回传，审计与日志串联 |
+| AuditStore | 只追加 + 哈希链的审计库，可校验篡改 |
+| Readiness | `/ready` 探针，检查图与审计库是否可用 |
 
 ---
 
@@ -522,28 +709,49 @@ python -m scripts.eval_intent --engine jev --translate
 5. **对话链路和案件链路不是二选一**  
    它们是同一平台里的两种执行模式：轻问答走对话图，长事务 / 高风险走案件状态机。
 
+6. **接入层限流与审计是单进程实现**  
+   限流桶在内存、审计在 SQLite。多副本部署前必须换 Redis 限流和 Postgres/WORM 审计。
+
+7. **`/health` 与 `/ready` 不能混用**  
+   `/health` 只表示进程存活；`/ready` 会检查理赔图与审计库，未就绪返回 503，应作为摘流依据。
+
+8. **投资 `execute` 不等于默认可下单**  
+   未注册券商 / 基金平台适配器时，执行会显式失败；只有 `approve` 且适配器实际执行成功才标记 `executed`。
+
 ---
 
 ## 12. 一页纸总结
 
+当前（v0.2）：
+
 ```text
 用户请求
   ↓
-FastAPI 接入
+接入层：RequestID / 认证 / 体积上限 / 限流 / 审计 / 500 兜底
   ↓
-中间件：鉴权 / 限流 / 脱敏 / 审计
+静态路由：/assistant /claims /investment /documents
+  ↓
+对话图 classify  |  理赔状态机  |  投资图
+  ↓
+RAG / 三专家（MiddlewareChain）/ 工具 / HITL
+  ↓
+SSE 返回 + 审计 / 指标（Outbox 组件已实现，主图未接入）
+```
+
+目标态（v0.3+）：
+
+```text
+用户请求
+  ↓
+接入层（同上）
   ↓
 IntentRouter：domain + intent + confidence
   ↓
-DomainRegistry：校验领域与意图
+DomainRegistry → DomainPlugin（claims / investment / general）
   ↓
-DomainPlugin：claims / investment / general
+LangGraph 图执行 + Capability SPI
   ↓
-LangGraph：对话图 或 案件状态机
-  ↓
-RAG / 三专家 / 工具 / HITL
-  ↓
-SSE 返回 + Outbox 事件 + 观测指标
+SSE + EventBus / Outbox + 观测
 ```
 
-**一句话：统一入口做分诊，领域插件做业务，Capability SPI 做水平扩展。**
+**一句话：当前是三条并行链路 + 统一接入层；目标是统一分诊 + 领域插件，Capability SPI 做水平扩展。**

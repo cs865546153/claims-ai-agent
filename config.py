@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 from functools import lru_cache
+from logging_setup import MODEL_CALL_LOGGER
 from settings import Settings
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
@@ -45,6 +46,7 @@ def _chat(
     api_key: SecretStr | None = None,
     max_retries: int = 2,
     thinking: bool | None = None,
+    task: str | None = None,
 ) -> ChatOpenAI:
     """统一创建聊天模型，实例化不发起网络请求。"""
     effective_base_url = base_url if base_url is not None else OPENAI_BASE_URL
@@ -73,6 +75,9 @@ def _chat(
         extra_body=extra_body,
         timeout=120.0,
         max_retries=max_retries,
+        # 统一挂载模型调用日志；任务名写入 metadata，日志里可直接定位档位。
+        callbacks=[MODEL_CALL_LOGGER],
+        metadata={'task': task} if task else None,
     )
 
 
@@ -118,7 +123,7 @@ TASK_PROFILES: Final[dict[str, TaskProfile]] = {
 }
 
 
-def _task_model(profile: TaskProfile) -> ChatOpenAI:
+def _task_model(task: str, profile: TaskProfile) -> ChatOpenAI:
     """将任务参数传入统一工厂，沿用环境变量指定的服务与模型。"""
     return _chat(
         settings.model_name(profile.tier),
@@ -128,11 +133,12 @@ def _task_model(profile: TaskProfile) -> ChatOpenAI:
         frequency_penalty=profile.frequency_penalty,
         presence_penalty=profile.presence_penalty,
         response_format=profile.response_format,
+        task=task,
     )
 
 
 MODEL_ROUTING: Final[dict[str, ChatOpenAI]] = {
-    task: _task_model(profile) for task, profile in TASK_PROFILES.items()
+    task: _task_model(task, profile) for task, profile in TASK_PROFILES.items()
 }
 
 
@@ -155,7 +161,7 @@ class ClaimLLMFactory:
         name, temperature = profiles[tier]
         parameters = dict(temperature=temperature, max_tokens=2000, stop=())
         parameters.update(overrides)
-        return _chat(settings.model_name(name), **parameters)
+        return _chat(settings.model_name(name), task=tier, **parameters)
 
     @property
     def fast_model(self) -> ChatOpenAI:

@@ -7,12 +7,19 @@
   理赔工作台 UI（聊天 / 单证上传 / 链路可视化）
        |
        v   HTTP / SSE
+【接入层】 EnterpriseHttpMiddleware（纯 ASGI，每个请求）
+  CORS -> RequestID -> 认证 -> 体积上限 -> 限流 -> 审计 -> 500 兜底
+  认证：/api/* 校验 X-API-Key；生产启动强制配置密钥
+  限流：身份 + IP + 接口类别（进程内；多副本需 Redis）
+  审计：脱敏入参写入 audit.sqlite，只追加 + 哈希链
+       |
+       v
 【路由层】 app.py (FastAPI) —— 纯 URL 静态匹配，无大模型
   /api/assistant/stream                     -> 链路① 对话助手
   /api/claims/process · supplement · review · {id}  -> 链路② 理赔状态机
   /api/documents/analyze                    -> 单证识别
   /api/demo/claims/process                  -> 演示（复用链路②）
-  /health · /metrics
+  /health · /ready · /metrics               -> 存活 / 就绪 / 指标
        |
        v
 【编排层】
@@ -24,7 +31,7 @@
        v
 【服务层】
   WorkflowServices（policy / verify / expert + clause_retriever 条款检索）
-  MiddlewareChain（限流 -> 脱敏 -> 缓存 -> 推理 -> 审计 -> HITL）
+  MiddlewareChain（三专家：脱敏 -> 按案限流 -> 缓存 -> 推理 -> 降级 -> 审计 -> HITL 标记）
        |
        v
 【适配器层】
@@ -38,11 +45,12 @@
        v
 【数据层】
   SQLite : checkpoints.sqlite（状态机检查点）
+           audit.sqlite     （请求审计，只追加 + 哈希链）
            policies.sqlite  （本地保单，新增）
-           outbox.sqlite    （赔付/通知回写队列）
+           outbox.sqlite    （回写队列；组件已实现，主图未注入）
   Redis（会话历史，可选）· Milvus（条款向量，可选）· 核心系统 HTTP（真实保单）
 
-【横切】 认证 · mask_pii 脱敏 · 限流 · 审计 · LangFuse / Prometheus
+【横切】 接入层：RequestID / 认证 / 限流 / 审计；模型层：脱敏 / 缓存 / 降级；观测：LangFuse / Prometheus / stdout JSON
 ```
 
 ## 二、入口路由：两层，只有一层有大模型判断
@@ -51,8 +59,8 @@
 HTTP 路由（无模型，静态 URL 匹配）
   /api/assistant/stream  /api/claims/*  /api/documents/analyze ...
         │
-        ▼
-意图路由（flash 大模型判断）  <-- 大模型入口在这里
+        ├─ /api/assistant/stream ──▶ 对话图内 classify（flash 大模型判断） <-- 仅对话链路
+        └─ /api/claims/* ─────────▶ 直接进入理赔状态机（无意图路由）
 ```
 
 1. **HTTP 层路由**（FastAPI 装饰器）—— 纯 URL 匹配，请求打到哪个 endpoint 是写死的，**没有大模型**。
@@ -171,10 +179,11 @@ START
 | 责任专家 | max（pro） | 降级回退 flash |
 | 回答生成 | plus | 客服/通用回答 |
 
-## 七、三处 SQLite 职责
+## 七、四处 SQLite 职责
 
 ```
 checkpoints.sqlite  <- 链路② 状态机断点/恢复（AsyncSqliteSaver）
+audit.sqlite        <- 接入层 请求审计（只追加 + 哈希链，可 verify_chain）
 policies.sqlite     <- 链路① 保单查询的本地模拟数据（PolicyStore）
-outbox.sqlite       <- 赔付/通知回写队列（Outbox，入队 ≠ 付款）
+outbox.sqlite       <- 赔付/通知回写队列（Outbox 已实现，主图未注入，入队 ≠ 付款）
 ```
