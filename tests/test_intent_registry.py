@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from claims_platform.intent.contracts import RouteDecision
-from claims_platform.intent.registry import DomainRegistry
+from agent_core.intent.contracts import RouteDecision
+from agent_core.intent.registry import DomainRegistry
 
 
 def test_default_registry_loads_expected_domains() -> None:

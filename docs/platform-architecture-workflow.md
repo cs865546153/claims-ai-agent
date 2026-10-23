@@ -476,7 +476,7 @@ investment 图
 
 ## 6. 意图路由内部流程
 
-> 本节描述 `claims_platform/intent` 的设计。代码已实现并有评测脚本，但主 app 仍使用图内 `classify`，尚未接入。
+> 本节描述 `agent_core/intent` 的设计。代码已实现并有评测脚本，但主 app 仍使用图内 `classify`，尚未接入。
 
 ### 6.1 shadow 模式（当前默认）
 
@@ -537,12 +537,12 @@ INTENT_MARGIN_THRESHOLD=0.2
 | `agents/claim_agent.py` | `[已落地]` 理赔状态机 + 三专家 + `route_decision` + HITL |
 | `agents/investment_agent.py` | `[已落地]` 投资图：组合诊断 / 风险评估 / 二次确认 / 审批 / 执行 |
 | `adapters/investment.py` | `[已落地]` 券商适配器接口 + 演示数据；真实适配器待接 |
-| `claims_platform/intent/contracts.py` | `[已实现未接入]` `IntentRequest`、`RouteDecision`、`DomainManifest`、`IntentClassifier` |
-| `claims_platform/intent/registry.py` | `[已实现未接入]` 从 `configs/domains.yaml` 加载领域 |
-| `claims_platform/intent/jev.py` | `[已实现未接入]` JEV 适配器、脱敏、可选翻译、置信度 / 边界纠正 |
-| `claims_platform/intent/llm.py` | `[已实现未接入]` LLM 主路由、可选翻译器 |
-| `claims_platform/intent/hybrid.py` | `[已实现未接入]` 主路由 + 兜底 + 影子 |
-| `claims_platform/intent/factory.py` | `[已实现未接入]` `shadow / hybrid / jev / llm` 四种预设 |
+| `agent_core/intent/contracts.py` | `[已实现未接入]` `IntentRequest`、`RouteDecision`、`DomainManifest`、`IntentClassifier` |
+| `agent_core/intent/registry.py` | `[已实现未接入]` 从 `configs/domains.yaml` 加载领域 |
+| `agent_core/intent/jev.py` | `[已实现未接入]` JEV 适配器、脱敏、可选翻译、置信度 / 边界纠正 |
+| `agent_core/intent/llm.py` | `[已实现未接入]` LLM 主路由、可选翻译器 |
+| `agent_core/intent/hybrid.py` | `[已实现未接入]` 主路由 + 兜底 + 影子 |
+| `agent_core/intent/factory.py` | `[已实现未接入]` `shadow / hybrid / jev / llm` 四种预设 |
 | `configs/domains.yaml` | `[已落地]` claims / investment / general 三领域清单 |
 | `scripts/eval_intent.py` | `[已落地]` 准确率、混淆矩阵、兜底率、影子一致性、延迟 |
 | `data/intent_golden.jsonl` | `[已落地]` 中英混合合成评测集 |
@@ -630,7 +630,7 @@ ObjectStore:  Local    → S3 / OSS
 | `adapters/investment.py` | 投资业务适配器接口 + 演示数据 |
 | `config.py` | 模型工厂与档位（flash / plus / max·pro / vision） |
 | `settings.py` | 环境配置，含 `INTENT_*` / `JEV_*` |
-| `claims_platform/intent/` | 意图路由公共层（已实现，未接入主 app） |
+| `agent_core/intent/` | 意图路由公共层（已实现，未接入主 app） |
 | `configs/domains.yaml` | 领域清单，单一事实源 |
 | `scripts/eval_intent.py` | 意图评测脚本 |
 | `scripts/audit_verify.py` | 审计链校验 CLI |

@@ -7,9 +7,9 @@ import json
 import httpx
 import pytest
 
-from claims_platform.intent.contracts import IntentRequest, Turn
-from claims_platform.intent.jev import JevError, JevIntentClassifier
-from claims_platform.intent.registry import DomainRegistry
+from agent_core.intent.contracts import IntentRequest, Turn
+from agent_core.intent.jev import JevError, JevIntentClassifier
+from agent_core.intent.registry import DomainRegistry
 
 
 def _response(

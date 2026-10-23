@@ -22,9 +22,9 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from claims_platform.intent.contracts import IntentRequest, Turn
-from claims_platform.intent.factory import PRESETS, IntentConfig, build_intent_classifier
-from claims_platform.intent.registry import DomainRegistry
+from agent_core.intent.contracts import IntentRequest, Turn
+from agent_core.intent.factory import PRESETS, IntentConfig, build_intent_classifier
+from agent_core.intent.registry import DomainRegistry
 from settings import Settings
 
 load_dotenv(Path(".env"), override=False)

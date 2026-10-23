@@ -11,6 +11,8 @@
 | `(.venv-py315)` | **主项目**：启动 Web 服务、跑测试、调用大模型 | FastAPI、uvicorn、LangChain 0.3 全家桶 |
 | `(.venv-deep)` | 官方 Deep Agents 隔离环境 | 只有 deepagents 及其依赖，**没有 uvicorn / FastAPI** |
 
+> 可选：本地 BGE-M3 embedding 使用独立的 `.venv-embed`（Python 3.12），因为 `torch` 暂无 Python 3.15 wheel；主项目仍用 `.venv-py315`，两者互不影响。配置见下文「本地 BGE-M3 embedding」。
+
 启动服务前，先确认提示符是 `(.venv-py315)`；如果不是，先切换。
 
 PowerShell：
@@ -227,6 +229,7 @@ kill <PID>
 | `Address already in use` | 8001 被占用，`lsof` 后 kill，或改用 `--port 8002` |
 | 启动时报缺少 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | `.env` 里 provider 与 key 不匹配；运行 `bash scripts/set_deepseek_key.sh` 或手工补 key |
 | 对话报 `APIConnectionError`（阶段 classification） | 当前 provider 的模型服务不可达：`local` 需 127.0.0.1:8000 有推理服务；`deepseek` 检查网络与 `DEEPSEEK_BASE_URL` |
+| RAG 报连接失败且 `EMBEDDING_BASE_URL` 指向 8010 | 本地 BGE-M3 服务未启动；按「本地 BGE-M3 embedding」启动 `.venv-embed` 服务 |
 | 对话报 `AuthenticationError` / HTTP 401 | DeepSeek key 无效或未生效；重新写入 key 后**重启**服务 |
 | 页面能打开，对话返回 503 | 本地模型地址不可达或模型名不匹配；查看 uvicorn 日志与 trace |
 | 单证识别 502/503 | 所选模型不支持多模态，或未按 JSON 返回 |
@@ -282,14 +285,14 @@ claims-agent-app/
 │   ├── policy_store.py         # 本地SQLite保单数据源（模拟数据）
 │   └── claim_write_producer.py # 幂等Outbox、重试及对账
 ├── adapters/                   # 真实接口与演示后端，未配置显式失败
-├── claims_platform/            # 平台内核：领域注册与意图路由（不可命名为 platform，会遮蔽标准库）
+├── agent_core/                 # Agent 内核：领域注册与意图路由（不可命名为 platform，会遮蔽标准库）
 ├── vendor/                     # 无 cp315 wheel 时使用的预构建纯 Python wheel（PyYAML）
 ├── prompts/                    # 四场景模板、动态规则与本地固定版本
 ├── models/                     # Pydantic契约、有限修复和Schema迁移
 ├── tests/                      # 单元、SDK协议、状态机、HTTP与可选Milvus集成
 ├── demos/                      # 参数/消息/本地接口/LangFuse演示及Mermaid源码
 ├── isolated_deep/              # 官方Deep Agents独立依赖、运行时和测试
-├── scripts/                    # 安装验证、一键启动、DeepSeek密钥写入、审计链校验、解析基准与Schema迁移
+├── scripts/                    # 安装验证、一键启动、DeepSeek密钥写入、审计链校验、解析基准、Schema迁移与本地BGE-M3服务
 ├── deploy/                     # 对拍、门禁、环境配置、监控告警和运维手册
 ├── monitoring.py               # Prometheus六组业务指标
 ├── health_check.py             # 三条HTTP健康与状态机验证
@@ -302,7 +305,7 @@ claims-agent-app/
 
 agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
-> `claims_platform/` 原名 `platform/`，与标准库同名会遮蔽 `platform` 模块，导致 `coverage`、`setuptools` 等直接报 `module 'platform' has no attribute ...`。已重命名为 `claims_platform/`，并同步更新 `scripts/eval_intent.py` 与 `tests/test_intent_*.py` 的导入；新增代码不要再用 `platform` 作为包名。
+> `agent_core/` 原名 `platform/`，与标准库同名会遮蔽 `platform` 模块，导致 `coverage`、`setuptools` 等直接报 `module 'platform' has no attribute ...`。已重命名为 `agent_core/`，并同步更新 `scripts/eval_intent.py` 与 `tests/test_intent_*.py` 的导入；新增代码不要再用 `platform` 作为包名。
 
 > 注：`My_Study/` 为个人学习测试目录，不属于本项目实现，可忽略。
 
@@ -504,6 +507,62 @@ python -m scripts.audit_verify --limit 10   # 校验哈希链，退出码 0 = �
 设置MODEL_PROVIDER=bailian时使用OPENAI_BASE_URL/API_KEY及QWEN_*_MODEL；已有百炼密钥无需删除，但不会自动用于其他模式。三个qwen别名分别映射通用、强推理、轻量模型。
 
 设置MODEL_PROVIDER=deepseek时使用DEEPSEEK_BASE_URL/API_KEY及DEEPSEEK_FLASH_MODEL/DEEPSEEK_PRO_MODEL；默认base_url为`https://api.deepseek.com`，flash映射通用/轻量/视觉档位，pro映射强推理档位。DeepSeek思考模式默认关闭（DEEPSEEK_THINKING=false），因为推理token计入max_tokens且会削弱确定性；需要更强推理时设为true。DeepSeek不提供embedding接口，RAG仍需单独配置EMBEDDING_*。
+
+### 本地 BGE-M3 embedding（可选）
+
+不想依赖云端 embedding 时，可以在本机运行 BGE-M3（568M 参数、1024 维，CPU 即可）。主项目环境是 Python 3.15，而 `torch` / `onnxruntime` 目前没有 cp315 wheel，因此**推理要单独用 Python 3.12 环境**；主项目只通过 HTTP 调用。以下命令在项目根目录、激活 `.venv-py315` 后执行（第 2 步的 `.venv-embed` 除外）。
+
+```bash
+# 1) 下载权重（国内推荐 ModelScope；跳过 onnx 可省 2GB+）
+python -m pip install modelscope -i https://pypi.tuna.tsinghua.edu.cn/simple
+modelscope download --model BAAI/bge-m3 --local-dir ./models/bge-m3 \
+  --exclude 'onnx/*' 'imgs/*' '*.jpg' '*.webp'
+
+# 或走 HuggingFace 镜像（镜像站不支持 Xet，必须关闭，否则容易卡住）
+# pip install -U huggingface_hub
+# HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 \
+#   hf download BAAI/bge-m3 --local-dir ./models/bge-m3
+
+# 2) 独立 Python 3.12 推理环境
+uv python install 3.12
+uv venv --python 3.12 .venv-embed
+uv pip install --python .venv-embed/bin/python \
+  sentence-transformers sentencepiece fastapi uvicorn
+
+# 3) 启动 OpenAI 兼容的 /v1/embeddings 服务
+.venv-embed/bin/uvicorn scripts.embed_server:app --host 127.0.0.1 --port 8010
+```
+
+> Windows 把 `.venv-embed/bin/` 换成 `.venv-embed\Scripts\`（例如 `.venv-embed\Scripts\uvicorn.exe`）；下载与虚拟环境步骤相同。
+
+`.env` 对应改为：
+
+```ini
+EMBEDDING_BASE_URL=http://127.0.0.1:8010/v1
+EMBEDDING_MODEL=bge-m3
+EMBEDDING_API_KEY=local
+```
+
+验证：
+
+```bash
+curl -s http://127.0.0.1:8010/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"bge-m3","input":"机动车保险责任条款"}' \
+  | python -c "import sys,json;print(len(json.load(sys.stdin)['data'][0]['embedding']))"
+# 1024
+
+PYTHONPATH=. .venv-py315/bin/python demos/module05_demo.py --embed
+# {'documents': 2, 'dimensions': [1024, 1024]}
+```
+
+说明：
+
+- 服务端使用 `normalize_embeddings=True` 做 L2 归一化，与 `rag_retrieval.py` 的 Milvus `L2` 索引匹配。BGE-M3 是 **1024 维**，换 embedding 模型必须重建 `claims_*` collection，否则维度不匹配；`ClaimVectorStore` 默认 `drop_old=False`，不会自动清理。
+- 服务加载本地权重时会强制离线（`HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`）。否则 `transformers` 会尝试连接 `huggingface.co`，在无法访问该站点的网络下启动会卡数分钟。
+- `models/bge-m3/` 已加入 `.gitignore`，不会把 2GB 权重提交进仓库。
+- 不想引入 Python 环境时，也可用 Ollama：`ollama pull bge-m3`，然后把 `EMBEDDING_BASE_URL` 指向 `http://127.0.0.1:11434/v1`。
+- 以上只验证了 embedding 服务；完整向量入库/检索还需要可用的 Milvus，见「追踪、基础设施及部署」。本机验证组合：macOS arm64 + Python 3.12.15 + sentence-transformers 6.2.0 + torch 2.14.1，单条短文本约 0.5s、冷启动约 2s（不含首次下载）。
 
 ## 业务、RAG与记忆接入
 

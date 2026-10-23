@@ -9,14 +9,14 @@ import pytest
 from langchain_core.messages import AIMessage
 from pydantic import SecretStr
 
-from claims_platform.intent.contracts import (
+from agent_core.intent.contracts import (
     IntentClassificationError,
     IntentRequest,
     RouteDecision,
 )
-from claims_platform.intent.factory import IntentConfig, build_intent_classifier
-from claims_platform.intent.hybrid import HybridIntentClassifier
-from claims_platform.intent.registry import DomainRegistry
+from agent_core.intent.factory import IntentConfig, build_intent_classifier
+from agent_core.intent.hybrid import HybridIntentClassifier
+from agent_core.intent.registry import DomainRegistry
 
 
 class FakeClassifier:
