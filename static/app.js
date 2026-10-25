@@ -241,7 +241,7 @@ async function runDemoClaim(endpoint = "/api/demo/claims/process") {
     traceNode("claims", "running", "正在运行合成理赔状态机");
     traceNode("capability_state", "running", "初始化进程内 checkpointer");
     data.trace.forEach(updateTrace);
-    traceNode("capability_state", "compat", "进程内 checkpointer 保存案件状态");
+    traceNode("capability_state", "done", "已使用进程内 checkpointer 保存案件状态");
     traceNode("capability_outbox", "notconnected", "Outbox 未闭环，事件未落库");
     const decision = {accept: "受理建议", review: "人工复核", reject: "不受理建议", investigate: "调查核实"}[data.result.decision] || data.result.decision;
     traceNode("claims", "done", `演示决策：${decision}`);
@@ -385,7 +385,7 @@ function resetTrace() {
   traceNode("domain_plugin", "notconnected", "插件封装待接入，当前按链路选择");
   traceNode("investment", "compat", "已接入 · 咨询走对话，交易走确认 + 人工审批");
   investmentTraceNodes.forEach(id => traceNode(id, "skipped", "本轮未进入投资链路"));
-  traceNode("capability_state", "compat", "进程内 checkpointer，未外部化");
+  traceNode("capability_state", "skipped", "本轮未触发状态存储");
   traceNode("capability_rag", "skipped", "本轮未触发检索");
   traceNode("capability_hitl", "skipped", "本轮未触发人工审核");
   traceNode("capability_outbox", "notconnected", "Outbox 未闭环");
@@ -471,8 +471,10 @@ function updateTrace(event) {
   }
 
   if (event.node === "investment_rag" && !traceDetails.capability_rag) {
-    const state = event.status === "running" ? "running" : event.status;
-    traceNode("capability_rag", state, state === "compat" ? "投资知识库命中，向量索引降级" : "投资知识库混合检索");
+    const state = event.status === "running" ? "running"
+      : event.status === "error" ? "error"
+      : event.status === "skipped" ? "skipped" : "done";
+    traceNode("capability_rag", state, event.summary || "投资知识检索已触发");
     setTraceParams("capability_rag", {source: "investment_rag"}, event.output || {});
   }
 
@@ -496,7 +498,7 @@ function updateTrace(event) {
     traceNode("output", "running", "等待并接收流式回答");
   }
   if (event.node === "claims" && event.status === "done" && !traceDetails.capability_state) {
-    traceNode("capability_state", "compat", "案件上下文已返回；进程内状态未外部化");
+    traceNode("capability_state", "done", "案件上下文已返回；进程内 checkpointer，未外部化");
   }
 }
 resetTrace();
