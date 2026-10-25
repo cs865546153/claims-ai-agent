@@ -1,0 +1,55 @@
+{
+  "version": "2026-10-25",
+  "description": "投资领域公开投资者教育知识，仅用于教育性问答，不构成个性化投资建议。",
+  "documents": [
+    {
+      "file": "01-investment-basics.md",
+      "title": "投资基础：收益、风险与时间",
+      "topic": "投资基础",
+      "as_of": "2026-10-25",
+      "source_url": "https://www.investor.gov/introduction-investing/getting-started/asset-allocation"
+    },
+    {
+      "file": "02-asset-classes.md",
+      "title": "常见资产类别与产品",
+      "topic": "资产类别",
+      "as_of": "2026-10-25",
+      "source_url": "https://www.finra.org/investors/investing/investing-basics"
+    },
+    {
+      "file": "03-allocation-diversification.md",
+      "title": "资产配置、分散化与再平衡",
+      "topic": "资产配置",
+      "as_of": "2026-10-25",
+      "source_url": "https://www.investor.gov/introduction-investing/getting-started/asset-allocation"
+    },
+    {
+      "file": "04-risk-suitability.md",
+      "title": "投资风险与适当性管理",
+      "topic": "风险与适当性",
+      "as_of": "2026-10-25",
+      "source_url": "http://www.csrc.gov.cn/tianjin/c105377/c05f4e3a5604e4c7cac5fd6ddd85c231c/content.shtml"
+    },
+    {
+      "file": "05-funds-and-fees.md",
+      "title": "基金、指数与费用",
+      "topic": "基金与费用",
+      "as_of": "2026-10-25",
+      "source_url": "https://www.csrc.gov.cn/xizang/c105485/c1304209/content.shtml"
+    },
+    {
+      "file": "06-behavior-fraud-compliance.md",
+      "title": "投资行为偏差、诈骗识别与合规边界",
+      "topic": "行为与合规",
+      "as_of": "2026-10-25",
+      "source_url": "https://www.finra.org/investors/protect-your-money/avoid-fraud"
+    },
+    {
+      "file": "07-investment-faq.md",
+      "title": "投资常见问答",
+      "topic": "常见问答",
+      "as_of": "2026-10-25",
+      "source_url": "http://www.csrc.gov.cn/tianjin/c105377/c05f4e3a5604e4c7cac5fd6ddd85c231c/content.shtml"
+    }
+  ]
+}

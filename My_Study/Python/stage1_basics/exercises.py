@@ -12,6 +12,7 @@ from __future__ import annotations
 
 
 def fizzbuzz(n: int) -> list[str]:
+
     """返回 1..n 的 FizzBuzz 列表。
 
     规则：
@@ -25,6 +26,7 @@ def fizzbuzz(n: int) -> list[str]:
         fizzbuzz(5)  -> ["1", "2", "Fizz", "4", "Buzz"]
         fizzbuzz(15)[-1] -> "FizzBuzz"
     """
+
     raise NotImplementedError("TODO: 实现 fizzbuzz")
 
 

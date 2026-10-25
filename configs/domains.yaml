@@ -64,6 +64,7 @@ domains:
         description_en: Ask for investment direction, asset allocation ideas, or wealth management advice
         examples:
           - 现在适合买债券基金吗？
+          - 投资基础知识包括哪些内容？
         risk: medium
         mode: conversation
       - name: 组合诊断

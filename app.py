@@ -36,6 +36,8 @@ from config import ClaimLLMFactory, get_model
 from models.investment import (
     DemoInvestmentRunResponse,
     InvestmentConfirmation,
+    InvestmentRAGQuery,
+    InvestmentRAGResponse,
     InvestmentRequest,
     InvestmentResponse,
     InvestmentReviewInput,
@@ -83,6 +85,7 @@ def create_app(
     general_model: Any = None,
     investment_model: Any = None,
     investment_services: InvestmentServices | None = None,
+    investment_rag: Any = None,
 ) -> FastAPI:
     cfg = Settings()
     if cfg.business_mode == 'demo':
@@ -96,6 +99,13 @@ def create_app(
     investment_service = investment_services or InvestmentServices(
         DemoInvestmentBackend() if cfg.business_mode == 'demo' else InvestmentBackend()
     )
+    effective_investment_rag = investment_rag
+    if effective_investment_rag is None and cfg.investment_rag_enabled:
+        try:
+            from tools.investment_rag import get_investment_rag
+            effective_investment_rag = get_investment_rag()
+        except Exception:  # noqa: BLE001 - 投资知识库损坏不应阻断理赔主链路
+            logger.exception('投资知识库初始化失败，已关闭投资 RAG')
     limiter = RateLimitMiddleware()
     locks: dict[str, asyncio.Lock] = {}
 
@@ -385,6 +395,15 @@ def create_app(
             trace=build_demo_trace(state, request),
         )
 
+    @application.post('/api/investment/rag/search', response_model=InvestmentRAGResponse,
+                      dependencies=[Depends(authenticate)], tags=['投资域'])
+    async def search_investment_rag(body: InvestmentRAGQuery) -> InvestmentRAGResponse:
+        """只读检索投资知识库；返回引用，不生成交易建议。"""
+        if effective_investment_rag is None:
+            raise HTTPException(503, '投资知识库未启用')
+        result = await asyncio.to_thread(effective_investment_rag, body.question, body.top_k)
+        return InvestmentRAGResponse(**result)
+
     @application.post('/api/investment/process', response_model=InvestmentResponse,
                       dependencies=[Depends(authenticate)], tags=['投资域'])
     async def process_investment(request: InvestmentRequest) -> InvestmentResponse:
@@ -548,6 +567,7 @@ def create_app(
                     assistant_model=effective_assistant,
                     investment_model=effective_investment,
                     service=service,
+                    investment_rag=effective_investment_rag,
                 )
                 state = await graph.ainvoke({
                     'question': body.question,

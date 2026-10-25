@@ -124,12 +124,12 @@ flowchart TB
 | 模型 | 模型档位 | flash / plus / max·pro / vision | `config.py` |
 | 服务 | `WorkflowServices` | 理赔的 `policy` / `verify` / `expert` | `agents/claim_agent.py` |
 | 服务 | `InvestmentServices` | 组合查询、产品、交易提交 | `agents/investment_agent.py`、`adapters/investment.py` |
-| 服务 | RAG / 置信度 | 条款混合检索与引用校验；三专家置信度聚合 | `tools/rag_retrieval.py`、`agents/confidence.py` |
+| 服务 | RAG / 置信度 | 理赔条款混合检索与引用校验；投资 Wiki 的 BM25 + 向量混合检索；三专家置信度聚合 | `tools/rag_retrieval.py`、`tools/investment_rag.py`、`agents/confidence.py` |
 | 适配 | `BusinessBackend` / `DemoBackend` | 真实核心系统 / 合成保单 | `adapters/business.py` |
 | 适配 | `InvestmentBackend` / `Demo` | 真实券商适配器 / 合成组合 | `adapters/investment.py` |
 | 适配 | `Outbox` | 幂等键 + 租约 + 对账；组件已实现，**主图尚未注入**；入队 ≠ 付款 | `tools/claim_write_producer.py` |
 | 数据 | SQLite 数据文件 | `checkpoints` / `audit` / `policies`；`outbox` 由调用方指定路径 | `.data/*.sqlite` |
-| 数据 | Redis / Milvus | 会话历史（组件已实现，主 app 未接入）/ 条款向量 | `agents/memory.py`、`tools/rag_retrieval.py` |
+| 数据 | Redis / Milvus | 会话历史（组件已实现，主 app 未接入）/ 理赔条款与投资 Wiki 向量 | `agents/memory.py`、`tools/rag_retrieval.py`、`tools/investment_rag.py` |
 | 观测 | Prometheus / LangFuse / 日志 | 指标、追踪、stdout JSON | `monitoring.py`、`agents/observability.py` |
 | 探针 | `/health` / `/ready` | 存活 / 图与审计库就绪 | `app.py` |
 

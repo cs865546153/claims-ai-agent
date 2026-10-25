@@ -18,7 +18,8 @@ from agents.claim_agent import route_decision
 from agents.middleware_audit import mask_pii
 from models.workbench import IntentResult
 from monitoring import ERRORS
-from prompts.investment_prompt import INVESTMENT_ADVISOR_PROMPT
+from prompts.investment_prompt import INVESTMENT_ADVISOR_PROMPT, INVESTMENT_RAG_USAGE_PROMPT
+from tools.investment_rag import format_investment_context
 from tools.material_check import check_claim_materials
 
 INTENT_PROMPT = (
@@ -40,7 +41,7 @@ INTENT_PROMPT = (
     '买入、卖出、赎回或转账等会改变持仓的指令属于交易指令。'
     '分类示例（必须严格遵守）：'
     '“投资组合诊断”或“帮我看看我的投资组合风险”属于组合诊断；'
-    '“现在适合买什么基金”属于投资咨询；'
+    '“现在适合买什么基金”或“投资基础知识包括哪些”属于投资咨询；'
     '“评估一下我的风险承受能力”属于风险评估；'
     '“查一下沪深300指数基金的表现”属于产品查询；'
     '“买入1000元某某基金”属于交易指令。'
@@ -128,7 +129,8 @@ def _conversation(question: str, history: list[Any], system_prompt: str) -> list
 
 def build_assistant_graph(*, classifier: Any, general_model: Any,
                           assistant_model: Any, service: Any,
-                          investment_model: Any = None) -> Any:
+                          investment_model: Any = None,
+                          investment_rag: Any = None) -> Any:
     """构建无状态对话助手图；依赖经闭包注入，节点为 async 编排函数。"""
 
     async def classify(state: AssistantState) -> dict[str, Any]:
@@ -173,17 +175,9 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
         elif intent.intent in INVESTMENT_INTENTS:
             llm = investment_model or general_model
             stage = 'investment'
-            if intent.intent == '交易指令':
-                messages = []
-                needs_llm_answer = False
-            else:
-                messages = _conversation(
-                    state['question'], state['history'],
-                    INVESTMENT_ADVISOR_PROMPT
-                    + f'用户风险承受能力：{state.get("risk_profile") or "未提供"}。'
-                    + f'已识别单证摘要：{state["context"]}',
-                )
-                needs_llm_answer = True
+            # 交易指令不检索知识库，也不允许模型直接回答；由外层转人工/确认流程。
+            needs_llm_answer = intent.intent != '交易指令'
+            messages = []
         else:
             llm = assistant_model
             messages = _conversation(
@@ -195,6 +189,66 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
         events.append({'trace': {'node': 'route', 'status': 'done', 'selected': stage,
                                  'input': intent.model_dump() | {'material_continuation': material_continuation},
                                  'output': {'selected': stage, 'model': getattr(llm, 'model_name', '测试模型')}}})
+
+        if stage == 'investment' and needs_llm_answer:
+            knowledge_context = ''
+            if investment_rag is None:
+                events.append({'trace': {'node': 'investment_rag', 'status': 'skipped',
+                                         'summary': '投资知识库未启用',
+                                         'output': {'enabled': False}}})
+            else:
+                top_k = int(getattr(investment_rag, 'top_k', 4) or 4)
+                events.append({'trace': {'node': 'investment_rag', 'status': 'running',
+                                         'summary': '检索投资知识库（BM25 + 向量）',
+                                         'input': {'question': mask_pii(state['question']), 'top_k': top_k}}})
+                try:
+                    retrieved = await asyncio.to_thread(investment_rag, state['question'], top_k)
+                    documents = retrieved.get('documents', []) if isinstance(retrieved, dict) else []
+                    knowledge_context = format_investment_context(documents)
+                    vector_ready = bool(retrieved.get('vector_ready')) if isinstance(retrieved, dict) else False
+                    degraded = bool(retrieved.get('degraded')) if isinstance(retrieved, dict) else not vector_ready
+                    vector_error = retrieved.get('vector_error') if isinstance(retrieved, dict) else None
+                    if not documents:
+                        rag_status = 'skipped'
+                        rag_summary = '投资知识库未命中，按通用投资原则回答'
+                    elif vector_ready:
+                        rag_status = 'done'
+                        rag_summary = f'投资知识库命中 {len(documents)} 条（BM25 + 向量）'
+                    else:
+                        rag_status = 'compat'
+                        rag_summary = f'投资知识库命中 {len(documents)} 条（向量未连接，BM25 降级）'
+                    events.append({'trace': {
+                        'node': 'investment_rag',
+                        'status': rag_status,
+                        'summary': rag_summary,
+                        'output': {
+                            'citations': [
+                                {key: document.get(key) for key in (
+                                    'citation_id', 'doc_id', 'title', 'chapter', 'source', 'source_url',
+                                )}
+                                for document in documents
+                            ],
+                            'vector_ready': vector_ready,
+                            'degraded': degraded,
+                            'vector_error': vector_error,
+                            'corpus_size': retrieved.get('corpus_size') if isinstance(retrieved, dict) else None,
+                        },
+                    }})
+                except Exception as exc:  # noqa: BLE001 - RAG 失败不能阻断投资问答
+                    ERRORS.labels('investment_rag').inc()
+                    events.append({'trace': {'node': 'investment_rag', 'status': 'error',
+                                             'summary': f'投资知识库检索失败：{type(exc).__name__}',
+                                             'output': {'error': type(exc).__name__, 'detail': str(exc)}}})
+                    knowledge_context = format_investment_context([])
+            messages = _conversation(
+                state['question'], state['history'],
+                INVESTMENT_ADVISOR_PROMPT
+                + INVESTMENT_RAG_USAGE_PROMPT
+                + f'用户风险承受能力：{state.get("risk_profile") or "未提供"}。'
+                + f'已识别单证摘要：{state["context"]}\n\n'
+                + knowledge_context,
+            )
+
         return {'intent': intent.intent, 'confidence': intent.confidence, 'policy_id': intent.policy_id,
                 'material_continuation': material_continuation, 'stage': stage,
                 'llm': llm, 'messages': messages, 'needs_llm_answer': needs_llm_answer, 'events': events}

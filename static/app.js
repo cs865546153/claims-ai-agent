@@ -318,6 +318,7 @@ const traceNames = {
   claim_damage: "损失专家", claim_risk: "风险专家", claim_liability: "责任专家",
   claim_confidence: "置信度计算", claim_decision: "审核决策路由",
   investment_intake: "投资请求核查", investment_context: "组合与行情上下文",
+  investment_rag: "投资知识检索",
   investment_risk: "适当性与风险校验", investment_decision: "投资决策建议",
   investment_review: "人工审批", investment_execute: "交易执行",
 };
@@ -327,7 +328,7 @@ const claimTraceNodes = [
 ];
 const domainTraceNodes = ["claims", "investment", "general"];
 const investmentTraceNodes = [
-  "investment_intake", "investment_context", "investment_risk",
+  "investment_intake", "investment_context", "investment_rag", "investment_risk",
   "investment_decision", "investment_review", "investment_execute",
 ];
 const capabilityTraceNodes = [
@@ -368,7 +369,7 @@ function resetTrace() {
   const expertRow = `<div class="trace-parallel"><span>并行分析</span><div class="trace-experts">${["claim_damage", "claim_risk", "claim_liability"].map(id => node(id, "compact")).join("")}</div></div>`;
   const loop = '<div class="trace-loop" aria-label="材料不足时回流补充">↶ 材料不足时回流上传并重新核查</div>';
   const claimDetail = `<section id="claimTraceDetail" class="claim-trace-detail"><header><strong>理赔状态机明细</strong><span>对话预审 / 正式核赔节点</span></header>${node("claim_intake")}${arrow}${node("claim_documents")}${loop}${node("claim_followup")}${arrow}${node("claim_policy")}${arrow}${expertRow}${arrow}${node("claim_confidence")}${arrow}${node("claim_decision")}</section>`;
-  const investmentDetail = `<section id="investmentTraceDetail" class="trace-section inactive"><header><strong>投资智能体明细</strong><span>投顾问答 / 高风险交易案件</span></header>${node("investment_intake")}${arrow}${node("investment_context")}${arrow}${node("investment_risk")}${arrow}${node("investment_decision")}${arrow}${node("investment_review")}${arrow}${node("investment_execute")}</section>`;
+  const investmentDetail = `<section id="investmentTraceDetail" class="trace-section inactive"><header><strong>投资智能体明细</strong><span>投顾问答 / 高风险交易案件</span></header>${node("investment_intake")}${arrow}${node("investment_context")}${arrow}${node("investment_rag")}${arrow}${node("investment_risk")}${arrow}${node("investment_decision")}${arrow}${node("investment_review")}${arrow}${node("investment_execute")}</section>`;
   const platformDetail = `<section id="platformTraceDetail" class="trace-section"><header><strong>平台内核</strong><span>意图路由 / 领域注册 / 链路选择</span></header>${node("intent_router")}${arrow}${node("domain_registry")}${arrow}${node("route")}</section>`;
   const pluginDetail = `<section id="pluginTraceDetail" class="trace-section"><header><strong>领域插件</strong><span>当前选择的业务域</span></header>${node("domain_plugin")}<div class="trace-branches three">${domainTraceNodes.map(id => node(id, "compact")).join("")}</div></section>`;
   const capabilityDetail = `<section id="capabilityTraceDetail" class="trace-section"><header><strong>Capability SPI</strong><span>状态 / 检索 / 审核 / 事件</span></header><div class="trace-capabilities">${capabilityTraceNodes.map(id => node(id, "compact")).join("")}</div></section>`;
@@ -440,6 +441,7 @@ function updateTrace(event) {
       if (intent === "交易指令") {
         traceNode("investment_intake", "done", "已识别交易指令，尚未提交案件");
         traceNode("investment_context", "skipped", "等待产品、金额与风险等级");
+        traceNode("investment_rag", "skipped", "交易指令不检索知识库");
         traceNode("investment_risk", "skipped", "案件提交后执行适当性校验");
         traceNode("investment_decision", "done", "已拦截模型直接下单");
         traceNode("investment_review", "compat", "二次确认后转人工审批");
@@ -447,6 +449,7 @@ function updateTrace(event) {
       } else {
         traceNode("investment_intake", "done", `已识别${intent}`);
         traceNode("investment_context", "done", "已带入风险偏好与单证摘要");
+        traceNode("investment_rag", "running", "检索投资知识库（BM25 + 向量）");
         traceNode("investment_risk", "skipped", "投顾咨询不单独计算交易适当性");
         traceNode("investment_decision", "running", "投顾模型生成建议中");
         traceNode("investment_review", "skipped", "咨询类请求无需人工审批");
@@ -465,6 +468,12 @@ function updateTrace(event) {
   if (event.node === "claim_policy" && ["running", "done"].includes(event.status) && !traceDetails.capability_rag) {
     traceNode("capability_rag", event.status === "done" ? "done" : "running", "保单 / 条款知识检索");
     if (event.output) setTraceParams("capability_rag", {source: "claim_policy"}, event.output);
+  }
+
+  if (event.node === "investment_rag" && !traceDetails.capability_rag) {
+    const state = event.status === "running" ? "running" : event.status;
+    traceNode("capability_rag", state, state === "compat" ? "投资知识库命中，向量索引降级" : "投资知识库混合检索");
+    setTraceParams("capability_rag", {source: "investment_rag"}, event.output || {});
   }
 
   if (event.node === "claim_decision" && event.status === "done" && !traceDetails.capability_hitl) {

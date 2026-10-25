@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     embedding_model: str = 'bge-m3'
     embedding_api_key: SecretStr = SecretStr('EMPTY')
     milvus_uri: str = 'http://127.0.0.1:19530'
+    # 投资知识库 RAG：Wiki 走 BM25，BGE-M3 + Milvus 走向量召回；不可用时自动降级。
+    investment_rag_enabled: bool = True
+    investment_rag_collection: str = 'investment_wiki'
+    investment_rag_top_k: int = 4
     redis_url: str = 'redis://127.0.0.1:6379/0'
     langfuse_enabled: bool = False
     langfuse_host: str = 'http://127.0.0.1:3000'

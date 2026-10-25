@@ -93,3 +93,39 @@ class InvestmentReviewInput(BaseModel):
     decision: Literal["approve", "reject", "review"]
     reviewer: str = Field(min_length=1, max_length=64)
     reason: str = Field(min_length=1, max_length=1000)
+
+
+class InvestmentRAGQuery(BaseModel):
+    """投资知识库检索请求；只读，不涉及交易。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    question: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=4, ge=1, le=8)
+
+
+class InvestmentRAGCitation(BaseModel):
+    """一条可追溯的投资知识引用。"""
+
+    model_config = ConfigDict(extra="forbid")
+    citation_id: str
+    doc_id: str
+    title: str
+    topic: str = ""
+    chapter: str
+    source: str
+    source_url: str = ""
+    as_of: str = ""
+    text: str
+
+
+class InvestmentRAGResponse(BaseModel):
+    """投资知识库混合检索结果；degraded 表示当前只有 BM25。"""
+
+    model_config = ConfigDict(extra="forbid")
+    query: str
+    documents: list[InvestmentRAGCitation] = Field(default_factory=list)
+    vector_ready: bool = False
+    degraded: bool = True
+    vector_error: str | None = None
+    corpus_size: int = 0
+    collection: str = "investment_wiki"

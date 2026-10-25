@@ -1,0 +1,5 @@
+      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND
+     1615    1614    1614      34700  ?         197609 00:14:11 /c/Users/86554/AppData/Local/Programs/Microsoft VS Code/Code
+     1614       1    1614      33116  ?         197609 00:14:11 /usr/bin/sh
+     1531       1    1531      10280  cons0     197609 23:52:31 /usr/bin/bash
+     1659    1531    1659      28644  cons0     197609 00:17:04 /usr/bin/PS
