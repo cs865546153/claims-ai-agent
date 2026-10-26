@@ -132,6 +132,140 @@ Reranker 挂了      → 词项重排兜底
 
 RAG 是增强，不是单点故障。
 
+### 1.3 先分清：离线 ingestion 与在线 retrieval
+
+这是最容易混淆的一组概念。
+
+这里的“离线”不是“断网”，而是指**不在用户请求链路上**，通常由脚本、定时任务或发布流程触发。
+
+```text
+离线 ingestion（写入侧 / 建索引）
+文档 → 解析 → 清洗 → 切片 → 元数据 → embedding
+     → 写入 ES / Milvus → 建立 BM25 / 向量索引
+
+在线 retrieval（查询侧 / 读索引）
+用户问题 → query 改写 → query embedding
+        → ES / Milvus 检索 → RRF → rerank → Top-K → LLM
+```
+
+#### 离线 ingestion 不是 ES 查询
+
+`ingestion` 是“数据摄入/入库”，核心动作是**写**：
+
+```text
+创建索引
+_bulk 写入 chunk
+删除旧版本 chunk
+refresh
+alias 切换
+```
+
+它负责把原始文档加工成可检索的索引，不负责回答用户问题。
+
+#### 在线 retrieval 才是查询
+
+`retrieval` 是用户每次提问时执行的流程，核心动作是**读**：
+
+```text
+BM25 / kNN 召回
+元数据过滤
+RRF 融合
+Reranker 精排
+取 Top-K
+```
+
+所以：
+
+```text
+ES 写入 / 建索引  → 离线 ingestion
+ES _search 查询   → 在线 retrieval
+```
+
+ES 不是只属于其中一边，它是**两边共用的存储和检索引擎**。
+
+#### 用图书馆类比
+
+```text
+离线 ingestion：
+买书 → 编目 → 贴标签 → 上架 → 建目录
+
+在线 retrieval：
+读者提问 → 查目录 → 找到相关书 → 取出几页
+```
+
+读者来一次，不需要重新买书、编目、上架；只有新书到了才需要重新 ingestion。
+
+#### 知识库不更新，不需要重新切片
+
+只要下面这些都没有变化：
+
+- 文档内容没变
+- 切块规则没变
+- embedding 模型和维度没变
+- 索引 mapping / analyzer 没变
+- 元数据字段没变
+
+就可以直接复用已经入库的 chunk、向量和 BM25 索引。应用重启时只需要重连 ES/Milvus，不需要重新切片。
+
+需要重建的典型情况：
+
+| 变化 | 是否重新切片 | 是否重新 embedding |
+| --- | --- | --- |
+| 文档内容更新 | 只切变更文档 | 变更文档需要 |
+| 切块规则变化 | 全部重切 | 全部重做 |
+| embedding 模型/维度变化 | 不一定 | 全部重做 |
+| ES analyzer / mapping 变化 | 通常不需要 | 视情况重建索引 |
+| reranker 变化 | 不需要 | 不需要 |
+| 只改 RRF 权重 / Top-K | 不需要 | 不需要 |
+
+生产环境通常用：
+
+```text
+source_hash + chunk_config_hash + embedding_model
+```
+
+判断某个文档是否需要重新 ingestion。
+
+全量重建时不要直接删生产索引，推荐：
+
+```text
+knowledge_v1 → 构建 knowledge_v2 → 校验 → alias 切到 v2 → 删除 v1
+```
+
+查询始终访问 alias，例如 `knowledge_current`，避免重建期间线上不可用。
+
+#### 对应到当前项目
+
+当前本机 demo 把 ingestion 放在了应用启动时：
+
+```text
+create_app()
+  → get_investment_rag()
+  → load_investment_documents()
+  → 切片
+  → BM25Index()
+```
+
+这是“启动时顺手做了 ingestion”，适合小数据量 demo，但生产不建议这么做。
+
+通用知识库略有不同：`KnowledgeRAG` 启动时只建容器，首次访问某个 domain 才加载。但它本质上仍是进程内即时切分，不是生产级的离线索引。
+
+生产应拆成：
+
+```text
+离线脚本 / 任务：
+scripts/ingest_*.py
+  → 解析、切片、embedding、写 ES/Milvus
+
+在线服务：
+app.py
+  → 只负责 query → 检索 → rerank → LLM
+```
+
+一句话：
+
+> **离线 ingestion 是“把知识库加工好并写进搜索引擎”；在线 retrieval 是“用户提问时去搜索引擎里查”。**
+
 ---
 
 ## 2. 组件职责总表
