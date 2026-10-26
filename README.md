@@ -42,6 +42,9 @@ macOS 自带的 `/usr/bin/python3` 通常是 3.9.6，**低于项目要求的 3.1
 最短路径（依赖已装好时）：
 
 ```bash
+#查看端口是否被占用
+lsof -ti tcp:8001 | xargs ps -o pid,ppid,command -p
+
 cd /Users/Song/workspace/claims-ai-agent
 bash scripts/set_deepseek_key.sh   # 首次：交互式写入 DeepSeek Key 并校验（不回显）
 bash scripts/start_mac.sh          # 启动；任意目录执行都可以，自动切根目录 + 选 venv
@@ -181,21 +184,6 @@ uvicorn app:app --host 127.0.0.1 --port 8001 --reload \
 - 接口文档：<http://127.0.0.1:8001/docs>
 - 检查点库：首次启动自动创建 `.data/checkpoints.sqlite`
 - 审计库：首次启动自动创建 `.data/audit.sqlite`（只追加 + 哈希链）
-- 应用日志：默认 `.data/logs/app.log`（由 `.env` 的 `LOG_FILE` 控制，单文件 10MB、保留 5 份）
-- uvicorn 日志：默认 `.data/logs/uvicorn.log`（`scripts/start_mac.sh` 会自动 tee）
-
-**日志落盘**
-
-- 应用日志默认 `.data/logs/app.log`；目录不存在会自动创建。
-- `LOG_MAX_BYTES` 控制单文件上限（默认 10MB），`LOG_BACKUP_COUNT` 控制保留份数（默认 5）；`LOG_MAX_BYTES=0` 关闭轮转。
-- `scripts/start_mac.sh` 会同时把 uvicorn 输出写入 `.data/logs/uvicorn.log`。
-- 手动启动时如需把 uvicorn 日志也落盘：
-
-```bash
-mkdir -p .data/logs
-LOG_FILE=.data/logs/app.log uvicorn app:app --host 127.0.0.1 --port 8001 --reload \
-  2>&1 | tee -a .data/logs/uvicorn.log
-```
 
 **热重载说明**
 
