@@ -1,7 +1,6 @@
 # 已适配 Python 3.15（Windows 无编译环境）：仅将无 cp315 wheel 的编译包升级，
-# 其余保持原锁定版本。历史冻结见 requirements-py314.lock.txt（Python 3.14）
-# 与 requirements-legacy-py312.lock.txt（Python 3.12）。
-# Windows 不安装 milvus-lite（其仅支持 Linux/macOS），RAG 连接外部 Milvus 服务。
+# 其余保持锁定版本。完整冻结见 requirements-py315.lock.txt。
+# Windows 不安装 milvus-lite（仅支持 Linux/macOS），使用外部 Milvus；macOS/Linux 可用本地 Lite。
 # 注意：PyYAML 6.0.3 暂无 cp315 Windows wheel，需先用纯 Python 方式构建（见 README）。
 
 # LangChain 0.3 系列与本地 OpenAI 兼容推理接口
@@ -23,6 +22,10 @@ langgraph-sdk==0.1.51
 # Milvus 向量检索客户端
 langchain-milvus==0.1.7
 pymilvus==2.6.9
+# 本地嵌入式 Milvus（macOS/Linux）；Windows 使用远程 Milvus 服务
+milvus-lite==3.2.2 ; sys_platform != "win32"
+faiss-cpu==1.15.1 ; sys_platform != "win32"
+pyarrow==26.0.0 ; sys_platform != "win32"
 numpy==2.5.3
 scipy==1.18.1
 setuptools>=75.6.0

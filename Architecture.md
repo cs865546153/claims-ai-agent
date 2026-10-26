@@ -157,6 +157,12 @@ START
 > 判责条款检索（RAG）：`WorkflowServices` 注入 `clause_retriever` 后，专家先检索适用条款
 > （`build_clause_retriever` -> `HybridRetriever`，向量 + BM25 加权 RRF），条款注入 prompt，
 > 专家在 `clause_ids` 中引用；引用必须落在已检索条款内，未配置或检索失败降级为无条款。
+>
+> 通用知识库 RAG：`tools/knowledge_rag.py` 对 `data/knowledge_base/` 和投资 Wiki 做
+> dense + BM25 + 元数据三路召回，加权 RRF 后用 BGE-Reranker 精排；`/api/rag/search`
+> 返回片段与引用，`/api/rag/answer` 生成答案并校验 `citation_ids`。
+> 当前 `models/bge-reranker-base` 已下载并启用，正常检索返回
+> `rerank_fallback=false`；模型或服务不可用时自动降级为词项重排。
 
 ## 五、其他 LangGraph/LangChain 结构（`claim_agent.py`，未接主 app）
 

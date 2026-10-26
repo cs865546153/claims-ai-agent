@@ -34,7 +34,9 @@ Markdown Wiki
   → BM25 索引
   → BGE-M3 Embedding
   → Milvus 向量索引
-  → HybridRetriever（加权 RRF）
+  → KnowledgeBase 三路召回（dense + BM25 + metadata）
+  → 加权 RRF 融合
+  → BGE-Reranker 精排（失败时词项重排兜底）
   → 投资问答 Prompt
 ```
 
@@ -46,7 +48,10 @@ Markdown Wiki
 python scripts/build_investment_rag.py
 ```
 
-未启动 Milvus 时，投资问答会自动降级为 BM25 检索，并在调用链路中标记为“兼容/降级”，不会阻断回答。
+构建索引只需要 embedding + Milvus；在线问答的 BGE-Reranker 由同一个
+`scripts/embed_server.py` 提供 `/v1/rerank`。当前仓库已下载并启用
+`models/bge-reranker-base`。未启动 Milvus 时，投资问答会自动降级为 BM25 + 元数据
+检索，并在调用链路中标记为 `compat`；Reranker 不可用时只影响精排，不会阻断回答。
 
 ## 维护建议
 

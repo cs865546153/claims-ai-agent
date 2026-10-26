@@ -34,10 +34,25 @@ class Settings(BaseSettings):
     embedding_model: str = 'bge-m3'
     embedding_api_key: SecretStr = SecretStr('EMPTY')
     milvus_uri: str = 'http://127.0.0.1:19530'
+    # 应用实际使用的向量库地址：本地 Milvus Lite 用 .db 路径，远程/容器用 HTTP。
+    vector_store_uri: str | None = None
     # 投资知识库 RAG：Wiki 走 BM25，BGE-M3 + Milvus 走向量召回；不可用时自动降级。
     investment_rag_enabled: bool = True
     investment_rag_collection: str = 'investment_wiki'
     investment_rag_top_k: int = 4
+    # 通用知识库 RAG：目录内 Markdown/TXT/PDF/DOCX/HTML 自动切分，按 domain 懒加载。
+    knowledge_rag_enabled: bool = True
+    knowledge_base_dir: str = 'data/knowledge_base'
+    knowledge_rag_collection: str = 'knowledge_general'
+    knowledge_rag_top_k: int = 5
+    # 多路召回 + rerank：BM25 是召回线，Cross-Encoder 才是精排。
+    rag_candidate_multiplier: int = 4
+    rerank_enabled: bool = True
+    rerank_base_url: str = 'http://127.0.0.1:8010/v1'
+    rerank_model: str = 'bge-reranker-base'
+    rerank_timeout: float = 10.0
+    rerank_top_n: int = 20
+    rerank_retry_cooldown: float = 60.0
     redis_url: str = 'redis://127.0.0.1:6379/0'
     langfuse_enabled: bool = False
     langfuse_host: str = 'http://127.0.0.1:3000'
@@ -56,8 +71,8 @@ class Settings(BaseSettings):
     jev_model: str = 'ateve-jev-v1'
     jev_timeout_s: float = 10.0
 
-    @field_validator('local_llm_base_url', 'embedding_base_url', 'deepseek_base_url', 'openai_base_url',
-                     'jev_base_url', 'langfuse_host')
+    @field_validator('local_llm_base_url', 'embedding_base_url', 'rerank_base_url', 'deepseek_base_url',
+                     'openai_base_url', 'jev_base_url', 'langfuse_host')
     @classmethod
     def endpoint(cls, value: str) -> str:
         parsed = urlsplit(value)
@@ -73,6 +88,12 @@ class Settings(BaseSettings):
             raise ValueError('DeepSeek模式需要配置DEEPSEEK_API_KEY')
         if self.langfuse_enabled and (not self.langfuse_public_key or not self.langfuse_secret_key.get_secret_value()):
             raise ValueError('开启LangFuse需要LANGFUSE_PUBLIC_KEY和LANGFUSE_SECRET_KEY')
+        return self
+
+    @model_validator(mode='after')
+    def resolve_vector_store(self) -> 'Settings':
+        if self.vector_store_uri:
+            self.milvus_uri = self.vector_store_uri
         return self
 
     @property

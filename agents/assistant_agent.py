@@ -199,7 +199,7 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
             else:
                 top_k = int(getattr(investment_rag, 'top_k', 4) or 4)
                 events.append({'trace': {'node': 'investment_rag', 'status': 'running',
-                                         'summary': '检索投资知识库（BM25 + 向量）',
+                                         'summary': '检索投资知识库（多路召回 + rerank）',
                                          'input': {'question': mask_pii(state['question']), 'top_k': top_k}}})
                 try:
                     retrieved = await asyncio.to_thread(investment_rag, state['question'], top_k)
@@ -213,10 +213,10 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
                         rag_summary = '投资知识库未命中，按通用投资原则回答'
                     elif vector_ready:
                         rag_status = 'done'
-                        rag_summary = f'投资知识库命中 {len(documents)} 条（BM25 + 向量）'
+                        rag_summary = f'投资知识库命中 {len(documents)} 条（BM25 + 向量 + 元数据 + rerank）'
                     else:
                         rag_status = 'compat'
-                        rag_summary = f'投资知识库命中 {len(documents)} 条（向量未连接，BM25 降级）'
+                        rag_summary = f'投资知识库命中 {len(documents)} 条（向量未连接，BM25/元数据 + rerank）'
                     events.append({'trace': {
                         'node': 'investment_rag',
                         'status': rag_status,

@@ -42,6 +42,11 @@ from models.investment import (
     InvestmentResponse,
     InvestmentReviewInput,
 )
+from models.knowledge import (
+    KnowledgeAnswerResponse,
+    KnowledgeRAGQuery,
+    KnowledgeSearchResponse,
+)
 from models.schemas import ClaimRequest, ClaimResponse
 from models.workbench import AssistantRequest, DemoClaimRunResponse, DocumentBatchResponse
 from monitoring import metrics, REQUESTS, ERRORS, LATENCY, CONFIDENCE, ITERATIONS, TOKENS
@@ -86,6 +91,8 @@ def create_app(
     investment_model: Any = None,
     investment_services: InvestmentServices | None = None,
     investment_rag: Any = None,
+    knowledge_rag: Any = None,
+    knowledge_model: Any = None,
 ) -> FastAPI:
     cfg = Settings()
     if cfg.business_mode == 'demo':
@@ -106,6 +113,13 @@ def create_app(
             effective_investment_rag = get_investment_rag()
         except Exception:  # noqa: BLE001 - 投资知识库损坏不应阻断理赔主链路
             logger.exception('投资知识库初始化失败，已关闭投资 RAG')
+    effective_knowledge_rag = knowledge_rag
+    if effective_knowledge_rag is None and cfg.knowledge_rag_enabled:
+        try:
+            from tools.knowledge_rag import get_knowledge_rag
+            effective_knowledge_rag = get_knowledge_rag()
+        except Exception:  # noqa: BLE001 - 通用知识库损坏不应阻断既有业务
+            logger.exception('通用知识库初始化失败，已关闭 /api/rag')
     limiter = RateLimitMiddleware()
     locks: dict[str, asyncio.Lock] = {}
 
@@ -403,6 +417,60 @@ def create_app(
             raise HTTPException(503, '投资知识库未启用')
         result = await asyncio.to_thread(effective_investment_rag, body.question, body.top_k)
         return InvestmentRAGResponse(**result)
+
+    @application.get('/api/rag/domains', dependencies=[Depends(authenticate)], tags=['RAG'])
+    async def list_rag_domains() -> dict[str, Any]:
+        """列出已配置的知识库 domain；不触发向量库连接。"""
+        if effective_knowledge_rag is None:
+            raise HTTPException(503, '知识库 RAG 未启用')
+        return {'domains': effective_knowledge_rag.domains()}
+
+    @application.post('/api/rag/search', response_model=KnowledgeSearchResponse,
+                      dependencies=[Depends(authenticate)], tags=['RAG'])
+    async def search_knowledge_rag(body: KnowledgeRAGQuery) -> KnowledgeSearchResponse:
+        """多路召回 + RRF + rerank，返回 Top-K 片段和引用。"""
+        if effective_knowledge_rag is None:
+            raise HTTPException(503, '知识库 RAG 未启用')
+        from tools.knowledge_rag import KnowledgeBaseUnavailable
+        try:
+            result = await asyncio.to_thread(
+                effective_knowledge_rag.retrieve,
+                body.domain,
+                body.question,
+                body.top_k,
+                filters=body.filters or None,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, f'未知知识库：{body.domain}') from exc
+        except KnowledgeBaseUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return KnowledgeSearchResponse(**result)
+
+    @application.post('/api/rag/answer', response_model=KnowledgeAnswerResponse,
+                      dependencies=[Depends(authenticate)], tags=['RAG'])
+    async def answer_knowledge_rag(body: KnowledgeRAGQuery) -> KnowledgeAnswerResponse:
+        """检索后调用 LLM 生成答案，并校验 citation_ids 只能来自检索结果。"""
+        if effective_knowledge_rag is None:
+            raise HTTPException(503, '知识库 RAG 未启用')
+        from tools.knowledge_rag import KnowledgeAnswerError, KnowledgeBaseUnavailable
+        model = knowledge_model or ClaimLLMFactory.create(
+            'main', temperature=0.2, max_tokens=1500, response_format='json_object', stop=()
+        )
+        try:
+            result = await effective_knowledge_rag.answer(
+                body.domain,
+                body.question,
+                model,
+                body.top_k,
+                filters=body.filters or None,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, f'未知知识库：{body.domain}') from exc
+        except KnowledgeBaseUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except KnowledgeAnswerError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return KnowledgeAnswerResponse(**result)
 
     @application.post('/api/investment/process', response_model=InvestmentResponse,
                       dependencies=[Depends(authenticate)], tags=['投资域'])

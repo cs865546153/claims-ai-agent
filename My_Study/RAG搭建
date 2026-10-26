@@ -5,6 +5,11 @@
 >
 > 关联笔记：[RAG.md](RAG.md)（更偏原理与横向对比）；本文更偏工程搭建、组件协作与项目落地。
 
+> **当前项目状态（2026-10）**：理赔条款 RAG 使用 `HybridRetriever` 的
+> **BGE-M3 向量 + BM25 两路召回**；通用知识库与投资 Wiki 使用 `KnowledgeBase` 的
+> **dense + BM25 + 元数据三路召回**，加权 RRF 后交给 **BGE-Reranker** 精排。
+> `models/bge-reranker-base` 已下载并启用；Rerank 服务不可用时自动降级为词项重排。
+
 ---
 
 ## 目录
@@ -15,7 +20,7 @@
 4. [BGE-M3：语义向量检索](#4-bge-m3语义向量检索)
 5. [Wiki / RAG-Wiki：知识源与知识管理层](#5-wiki--rag-wiki知识源与知识管理层)
 6. [完整协作链路](#6-完整协作链路)
-7. [RRF：两路结果怎么融合](#7-rrf两路结果怎么融合)
+7. [RRF：多路结果怎么融合](#7-rrf多路结果怎么融合)
 8. [生成与引用校验](#8-生成与引用校验)
 9. [在 claims-ai-agent 中的落地](#9-在-claims-ai-agent-中的落地)
 10. [从零搭建的最小清单](#10-从零搭建的最小清单)
@@ -34,14 +39,14 @@ BM25      = 用关键词和统计规则找资料
 BGE-M3    = 用神经网络语义向量找资料
 Wiki      = 资料从哪里来
 Milvus    = 向量存在哪里、怎么快速相似度搜索
-RRF       = 两路检索结果怎么合成一个排名
+RRF       = 多路检索结果怎么合成一个排名
 Reranker  = 对候选结果再精排一次
 引用校验  = 防止模型编造依据
 ```
 
 一句话总结：
 
-> **Wiki 提供知识，BM25 和 BGE-M3 分别从“关键词”和“语义”两个方向召回，RRF 融合，Reranker 精排，大模型生成，最后用引用校验兜底。**
+> **Wiki 提供知识；条款常用 BM25 + BGE-M3 两路召回，通用知识库和投资 Wiki 再加元数据路。多路结果用 RRF 融合，BGE-Reranker 精排，大模型生成，最后用引用校验兜底。**
 
 ---
 
@@ -288,10 +293,12 @@ return OpenAIEmbeddings(
 
 `check_embedding_ctx_length=False` 的作用是：直接把原始字符串发给 BGE 服务，避免 OpenAI 风格的分词 token 数组与本地 BGE 服务不兼容。
 
-项目当前主要使用 **BGE-M3 Dense 向量**，关键词那一路交给 BM25。也就是说：
+项目当前主要使用 **BGE-M3 Dense 向量**，关键词那一路交给 BM25；通用知识库和
+投资 Wiki 还额外使用标题/章节元数据路。也就是说：
 
 ```text
-项目现状 = BGE-M3 Dense + BM25 + 加权 RRF
+理赔条款       = BGE-M3 Dense + BM25 + 加权 RRF
+通用/投资知识库 = BGE-M3 Dense + BM25 + metadata + 加权 RRF + BGE-Reranker
 ```
 
 而不是：
@@ -459,7 +466,7 @@ RAG 的效果，很多时候不取决于模型，而取决于知识治理。
 ④ 加权 RRF 融合
                     │
                     ▼
-⑤ 可选 Reranker 精排
+⑤ Reranker 精排（通用/投资已启用；条款链路当前未注入）
                     │
                     ▼
 ⑥ Top-K 条款
@@ -474,6 +481,10 @@ RAG 的效果，很多时候不取决于模型，而取决于知识治理。
 ⑨ 引用校验
    无依据 / 引用非法 → 转人工
 ```
+
+> 上图是理赔条款的在线链路：当前判责条款只做向量 + BM25 两路召回，`HybridRetriever`
+> 虽支持注入 reranker，但 `build_clause_retriever` 当前没有注入。通用知识库与投资
+> Wiki 已接入 BGE-Reranker；两者共享 RRF 与精排思想，只是召回路数和权重不同。
 
 ### 6.3 为什么要两路召回
 
@@ -501,17 +512,21 @@ RAG 的效果，很多时候不取决于模型，而取决于知识治理。
 真实系统 → 两者都要
 ```
 
+通用知识库和投资 Wiki 在这两路之外再加一路元数据匹配，用于“用户直接问某篇文档 /
+某一章”的场景；这会增加候选多样性，但不改变 BM25 与向量各自的职责。
+
 ---
 
-## 7. RRF：两路结果怎么融合
+## 7. RRF：多路结果怎么融合
 
 ### 7.1 为什么不能直接加分数
 
-向量检索和 BM25 的分数不在一个量纲：
+向量检索、BM25 和元数据打分的量纲完全不同：
 
 ```text
 向量相似度：可能是 0.82、0.79 ...
 BM25 分数：可能是 12.6、8.3 ...
+元数据分数：可能是 0～3 的启发式分 ...
 ```
 
 直接相加没有意义。RRF 的思路是：**不看原始分数，只看排名**。
@@ -528,18 +543,23 @@ score(d) = Σ weight_i / (k + rank_i(d))
 - `k`：平滑常数，常用 60；
 - `weight_i`：每一路的权重。
 
-项目中的实现：
+项目中有两组权重，分别对应两类 RAG：
 
 ```python
-weights = (0.7, 0.3)
+# 理赔条款：HybridRetriever（两路）
+weights = (0.7, 0.3)       # dense 0.7 / bm25 0.3
+
+# 通用知识库 / 投资 Wiki：KnowledgeBase（三路）
+weights = (0.55, 0.30, 0.15)  # dense / bm25 / metadata
+
 score += weight / (60 + rank)
 ```
 
 含义：
 
-- 向量检索占 70%；
-- BM25 占 30%；
-- 同一文档在两路都出现，分数累加；
+- 条款链路中向量占 70%，BM25 占 30%；
+- 通用/投资链路中 dense 0.55、BM25 0.30、元数据 0.15；
+- 同一文档在多路都出现，分数累加；
 - 排名越靠前，贡献越大。
 
 ### 7.3 一个简单例子
@@ -561,11 +581,12 @@ B = 0.7 / (60 + 5) + 0.3 / (60 + 1)
 ```
 
 结果 B 排在 A 前面。  
-因为 B 在两路都出现了，说明它既有语义相关性，也有关键词匹配。
+因为 B 在两路都出现了，说明它既有语义相关性，也有关键词匹配。三路召回只是在这个
+公式上再加一项 `0.15 / (60 + metadata_rank)`。
 
 ### 7.4 项目里的融合细节
 
-`HybridRetriever.retrieve()`：
+理赔条款 `HybridRetriever.retrieve()`：
 
 1. 向量检索取 `k * 3`；
 2. BM25 取 `k * 3`；
@@ -573,12 +594,23 @@ B = 0.7 / (60 + 5) + 0.3 / (60 + 1)
 4. 用 `doc_id` 去重；
 5. 加权 RRF 累加；
 6. 按融合分数排序；
-7. 可选 Reranker；
+7. Reranker（`HybridRetriever` 支持；当前判责条款链路未注入）；
 8. 返回 Top-K。
+
+通用知识库 / 投资 Wiki 的 `KnowledgeBase.retrieve()`：
+
+1. dense、BM25、metadata 三路各取 `k * candidate_multiplier`（默认 4 倍）；
+2. 按 `doc_id` 去重并过滤；
+3. 加权 RRF 累加；
+4. 取融合结果的前 `max(k * 3, k)` 条；
+5. 交给 BGE-Reranker 逐条打分并重排；
+6. Reranker 失败时保留融合顺序，并标记 `rerank_fallback=true`；
+7. 返回 Top-K。
 
 伪代码：
 
 ```python
+# 理赔条款：两路
 vector_results = vector_search(query, k * 3)
 keyword_results = bm25_search(query, k * 3)
 
@@ -587,6 +619,18 @@ for weight, results in [(0.7, vector_results), (0.3, keyword_results)]:
         score[doc.id] += weight / (60 + rank)
 
 return top_k(score)
+
+# 通用 / 投资：三路 + 精排
+for weight, results in [
+    (0.55, dense_results),
+    (0.30, bm25_results),
+    (0.15, metadata_results),
+]:
+    for rank, doc in enumerate(results, 1):
+        score[doc.id] += weight / (60 + rank)
+
+candidates = top_n(score, max(k * 3, k))
+return bge_reranker(query, candidates)[:k]
 ```
 
 ---
@@ -677,13 +721,20 @@ citation_check = “仅验证引用存在，语义支持度需人工或黄金数
 
 | 文件 | 作用 |
 | --- | --- |
-| `settings.py` | BGE-M3、Milvus 等配置 |
+| `settings.py` | BGE-M3、Milvus、RRF、Rerank 等配置 |
 | `tools/rag_retrieval.py` | 文档加载、切分、向量库、BM25、混合检索、RAG、评测指标 |
+| `tools/knowledge_rag.py` | 通用知识库：三路召回、加权 RRF、Rerank、引用回答 |
+| `tools/investment_rag.py` | 投资 Wiki 加载与 `InvestmentRAG` 入口 |
+| `tools/rerank.py` | BGE-Reranker HTTP 客户端、词项重排兜底 |
+| `tools/vector_store.py` | BGE-M3 + Milvus 向量检索封装 |
+| `scripts/embed_server.py` | `/v1/embeddings` 与 `/v1/rerank` 本地服务 |
 | `agents/claim_agent.py` | 判责链路注入 `clause_retriever` |
 | `tools/claim_tool.py` | `search_policy_clause` 工具 |
 | `tools/demo_clauses.py` | 内存条款演示，不依赖 Milvus |
-| `tests/test_rag.py` | RAG 基础测试 |
+| `tests/test_rag.py` | 理赔 RAG 基础测试 |
 | `tests/test_expert_clause_rag.py` | 专家链路条款检索测试 |
+| `tests/test_knowledge_rag.py` | 通用知识库 RAG 测试 |
+| `tests/test_rerank.py` | BGE-Reranker 客户端与降级测试 |
 
 ### 9.2 核心类
 
@@ -693,7 +744,9 @@ citation_check = “仅验证引用存在，语义支持度需人工或黄金数
 | `create_embeddings()` | 创建 BGE-M3 Embedding 客户端 |
 | `ClaimVectorStore` | Milvus 集合，按险种隔离 |
 | `chinese_tokens()` | 中文单字 + 双字 + 英文/数字分词 |
-| `HybridRetriever` | BGE-M3 向量 + BM25，加权 RRF |
+| `HybridRetriever` | BGE-M3 向量 + BM25，加权 RRF（理赔条款） |
+| `KnowledgeBase` | dense + BM25 + metadata 三路召回、RRF、Rerank（通用/投资） |
+| `HttpBgeReranker` / `LexicalReranker` | BGE-Reranker HTTP 客户端 / 词项重排兜底 |
 | `PolicyClauseRAG` | 检索 + 生成 + 引用校验 |
 | `CaseLawRAG` | 历史案例检索，Top 8 |
 | `MedicalCodeRAG` | 医疗编码检索，Top 3 |
@@ -799,7 +852,7 @@ retriever = HybridRetriever(lambda q, k: corpus, corpus)
 - [ ] 实现 BM25 检索；
 - [ ] 按险种 / 版本过滤；
 - [ ] 加权 RRF 融合；
-- [ ] 可选 Reranker；
+- [ ] BGE-Reranker 精排（模型/服务不可用时词项重排兜底）；
 - [ ] 返回 `doc_id`、正文、来源、章节。
 
 ### 10.5 生成
@@ -910,7 +963,7 @@ BGE-M3 的 Sparse 输出理论上可以补足关键词能力，但它和 BM25 �
 - BGE-M3 Sparse 需要模型推理和稀疏索引支持；
 - 工程上要根据延迟、成本、效果综合选择。
 
-### 误区 2：RRF 是把两路分数相加
+### 误区 2：RRF 是把多路分数相加
 
 不对。
 
@@ -1025,8 +1078,8 @@ Wiki / RAG-Wiki 是知识源和知识管理层；向量数据库是 Milvus / Qdr
 切分：按章节 + chunk_size=500 / overlap=50
 向量：BGE-M3 Dense → Milvus
 关键词：中文单字+双字 → BM25
-融合：0.7 × 向量 RRF + 0.3 × BM25 RRF，k=60
-精排：可选 BGE-Reranker
+融合：理赔 0.7/0.3；通用/投资 0.55/0.30/0.15，k=60
+精排：BGE-Reranker（当前已启用；失败时词项重排）
 生成：Top-K 条款 + JSON 输出
 校验：citation_ids 必须来自检索结果
 兜底：无依据 / 非法引用 → 转人工
@@ -1035,8 +1088,8 @@ Wiki / RAG-Wiki 是知识源和知识管理层；向量数据库是 Milvus / Qdr
 ```text
 语义问题找 BGE-M3
 精确问题找 BM25
-两路结果用 RRF 合
-候选太多用 Reranker
+多路结果用 RRF 合
+候选太多用 BGE-Reranker
 最终答案要能引用
 引用不对就转人工
 ```

@@ -105,8 +105,11 @@ class ClaimVectorStore:
     def update(self, documents: list[Document]) -> Any:
         if not documents or any(doc.metadata.get('insurance_type') != self.insurance_type for doc in documents):
             raise ValueError('更新文档险种必须一致')
-        # 0.1.7 upsert内部删除后插入；生产建议按新版本入库再切换检索版本。
-        return self.store.upsert(ids=[doc.metadata['doc_id'] for doc in documents], documents=documents)
+        # 新集合尚未创建时 col 为 None，先按新增写入；已有集合先删除同 ID 再写入。
+        ids = [doc.metadata['doc_id'] for doc in documents]
+        if self.store.col is not None:
+            self.store.delete(ids=ids)
+        return self.add(documents)
 
 
 def chinese_tokens(text: str) -> list[str]:

@@ -11,7 +11,7 @@
 | `(.venv-py315)` | **主项目**：启动 Web 服务、跑测试、调用大模型 | FastAPI、uvicorn、LangChain 0.3 全家桶 |
 | `(.venv-deep)` | 官方 Deep Agents 隔离环境 | 只有 deepagents 及其依赖，**没有 uvicorn / FastAPI** |
 
-> 可选：本地 BGE-M3 embedding 使用独立的 `.venv-embed`（Python 3.12），因为 `torch` 暂无 Python 3.15 wheel；主项目仍用 `.venv-py315`，两者互不影响。配置见下文「本地 BGE-M3 embedding」。
+> 可选：本地 BGE-M3 embedding / BGE-Reranker 使用独立的 `.venv-embed`（Python 3.12），因为 `torch` 暂无 Python 3.15 wheel；主项目仍用 `.venv-py315`，两者互不影响。当前开发机已下载并启用 `models/bge-reranker-base`；未安装时 RAG 自动降级为词项重排。配置见下文「本地 BGE-M3 embedding + Reranker」。
 
 启动服务前，先确认提示符是 `(.venv-py315)`；如果不是，先切换。
 
@@ -104,7 +104,7 @@ python -m pip check
 
 - Apple Silicon 原生 arm64 解释器可直接安装 arm64 wheel，不需要 Rosetta，也不需要 Xcode 编译。
 - `requirements.txt` 中 PyYAML 在 `python_version >= "3.15"` 时使用 `vendor/` 的纯 Python wheel（该标记对所有平台生效，不仅 Windows），功能一致，只是关闭 libyaml C 加速。
-- 本项目 RAG 通过 `MILVUS_URI` 连外部 Milvus，不依赖 `milvus-lite`；安装日志里没有 milvus-lite 属正常。
+- 本项目 RAG 通过 `VECTOR_STORE_URI`（未设置时回退 `MILVUS_URI`）选择向量库：macOS/Linux 可指向本地 `./.data/milvus.db` 使用嵌入式 Milvus Lite（默认安装 `milvus-lite`），也可指向外部 Milvus；Windows 不安装 `milvus-lite`，需连接外部 Milvus。
 
 ### 3. 配置 .env（默认 DeepSeek）
 
@@ -249,7 +249,7 @@ docker compose up -d --build
 
 Apple Silicon 上应用容器为 arm64。若 `--profile infra` 的 Milvus 拉不到 arm64 镜像，可对这些服务单独使用 `--platform linux/amd64`，或只启动 `app` 并指向外部 Milvus。
 
-> 本机验证（macOS 14.8.2 / Apple Silicon / Python 3.15.1）：`pip check` 无冲突，`pytest` 为 **145 passed, 1 skipped**（跳过项需真实 Milvus），`uvicorn app:app` 启动后 `/health`、`health_check.py` 均通过。国内网络安装依赖时请使用上面的清华镜像。
+> 本机验证（macOS 14.8.2 / Apple Silicon / Python 3.15.1）：`pip check` 无冲突，`pytest` 为 **169 passed, 1 skipped**（跳过项需真实 Milvus），`uvicorn app:app` 启动后 `/health`、`health_check.py` 均通过。国内网络安装依赖时请使用上面的清华镜像。
 
 ## 结构与职责
 
@@ -281,9 +281,14 @@ claims-agent-app/
 │   ├── medical_tool.py         # 异步医保核验
 │   ├── claim_tool.py           # 工具注册、审批绑定与并行消息闭环
 │   ├── llm_calls.py            # 同步与流式调用
-│   ├── rag_retrieval.py        # 文档加载、Milvus、混合检索及引用校验
+│   ├── rag_retrieval.py        # 理赔条款加载、Milvus/Lite、混合检索及引用校验
+│   ├── investment_rag.py       # 投资 Wiki 加载与投资 RAG 入口
+│   ├── knowledge_rag.py        # 通用知识库：多路召回 + RRF + rerank + 回答
+│   ├── rerank.py               # BGE-Reranker HTTP 客户端与词项降级
+│   ├── vector_store.py         # 通用 Milvus 集合与可达性检查
 │   ├── policy_store.py         # 本地SQLite保单数据源（模拟数据）
 │   └── claim_write_producer.py # 幂等Outbox、重试及对账
+├── data/knowledge_base/        # 通用知识库源文档（Markdown/TXT/PDF/DOCX/HTML）
 ├── adapters/                   # 真实接口与演示后端，未配置显式失败
 ├── agent_core/                 # Agent 内核：领域注册与意图路由（不可命名为 platform，会遮蔽标准库）
 ├── vendor/                     # 无 cp315 wheel 时使用的预构建纯 Python wheel（PyYAML）
@@ -292,7 +297,7 @@ claims-agent-app/
 ├── tests/                      # 单元、SDK协议、状态机、HTTP与可选Milvus集成
 ├── demos/                      # 参数/消息/本地接口/LangFuse演示及Mermaid源码
 ├── isolated_deep/              # 官方Deep Agents独立依赖、运行时和测试
-├── scripts/                    # 安装验证、一键启动、DeepSeek密钥写入、审计链校验、解析基准、Schema迁移与本地BGE-M3服务
+├── scripts/                    # 安装验证、一键启动、知识库索引、审计链校验、Schema迁移与本地BGE-M3/Reranker服务
 ├── deploy/                     # 对拍、门禁、环境配置、监控告警和运维手册
 ├── monitoring.py               # Prometheus六组业务指标
 ├── health_check.py             # 三条HTTP健康与状态机验证
@@ -339,7 +344,7 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
 ## 安装和离线验证（Windows；macOS 见上文「macOS 快速启动」）
 
-在项目根目录执行。项目要求 Python 3.12+；当前开发环境为 Python 3.15（Windows 无需 C 编译器）。`requirements.txt` 为精确锁定版本，完整冻结见 `requirements-py315.lock.txt`；历史版本保留在 `requirements-py314.lock.txt`（Python 3.14）与 `requirements-legacy-py312.lock.txt`（Python 3.12）。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务。
+在项目根目录执行。项目要求 Python 3.12+；当前开发环境为 Python 3.15（Windows 无需 C 编译器）。`requirements.txt` 为精确锁定版本，完整冻结见 `requirements-py315.lock.txt`。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务；macOS/Linux 可改用本地 `./.data/milvus.db`。
 
 3.15 适配要点：部分旧锁定版本没有 `cp315` Windows wheel，已做最小升级；`PyYAML 6.0.3` 官方无 `cp315` wheel，改用 `vendor/pyyaml-6.0.3-py3-none-any.whl`（纯 Python 构建，功能等价，仅关闭 libyaml C 加速），因此无需安装 Visual C++ 生成工具。
 
@@ -352,7 +357,7 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 | PyYAML | 6.0.3 | 6.0.3（纯 Python wheel） | 官方无 cp315 wheel，见 `vendor/` |
 | ruff | 0.9.10 | 不变 | 自带 `py3-none-win_amd64` wheel |
 
-> 验证结果：`pip check` 无依赖冲突；本轮测试集在 macOS 上为 **145 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例），Windows 未在本轮复测。
+> 验证结果：`pip check` 无依赖冲突；本轮测试集在 macOS 上为 **169 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例），Windows 未在本轮复测。
 
 Windows（PowerShell）：
 
@@ -508,9 +513,11 @@ python -m scripts.audit_verify --limit 10   # 校验哈希链，退出码 0 = �
 
 设置MODEL_PROVIDER=deepseek时使用DEEPSEEK_BASE_URL/API_KEY及DEEPSEEK_FLASH_MODEL/DEEPSEEK_PRO_MODEL；默认base_url为`https://api.deepseek.com`，flash映射通用/轻量/视觉档位，pro映射强推理档位。DeepSeek思考模式默认关闭（DEEPSEEK_THINKING=false），因为推理token计入max_tokens且会削弱确定性；需要更强推理时设为true。DeepSeek不提供embedding接口，RAG仍需单独配置EMBEDDING_*。
 
-### 本地 BGE-M3 embedding（可选）
+### 本地 BGE-M3 embedding + Reranker（当前已启用）
 
-不想依赖云端 embedding 时，可以在本机运行 BGE-M3（568M 参数、1024 维，CPU 即可）。主项目环境是 Python 3.15，而 `torch` / `onnxruntime` 目前没有 cp315 wheel，因此**推理要单独用 Python 3.12 环境**；主项目只通过 HTTP 调用。以下命令在项目根目录、激活 `.venv-py315` 后执行（第 2 步的 `.venv-embed` 除外）。
+不想依赖云端 embedding 时，可以在本机运行 BGE-M3（568M 参数、1024 维，CPU 即可）。主项目环境是 Python 3.15，而 `torch` / `onnxruntime` 目前没有 cp315 wheel，因此**推理要单独用 Python 3.12 环境**；主项目只通过 HTTP 调用。同一个服务还提供 `/v1/rerank`，供 RAG 的 Cross-Encoder 精排使用。
+
+当前开发机已下载 `models/bge-reranker-base`（safetensors 约 1.1GB），`/health` 返回 `reranker_available=true`，真实检索返回 `rerank_fallback=false`。以下命令用于新环境安装或升级；检索本身不依赖模型一定存在，缺失时会自动使用词项重排。命令在项目根目录、激活 `.venv-py315` 后执行（第 2 步的 `.venv-embed` 除外）。
 
 ```bash
 # 1) 下载权重（国内推荐 ModelScope；跳过 onnx 可省 2GB+）
@@ -523,13 +530,19 @@ modelscope download --model BAAI/bge-m3 --local-dir ./models/bge-m3 \
 # HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_XET=1 \
 #   hf download BAAI/bge-m3 --local-dir ./models/bge-m3
 
+# 1.1) 下载 BGE-Reranker（当前开发机已下载；新环境才需要执行）
+# safetensors 约 1.1GB；仓库同时提供 pytorch_model.bin / model.onnx，忽略它们可少下约 2.2GB。
+.venv-py315/bin/python -c "from modelscope import snapshot_download; \
+snapshot_download('BAAI/bge-reranker-base', local_dir='models/bge-reranker-base', \
+ignore_file_pattern=['pytorch_model.bin', '*.onnx'])"
+
 # 2) 独立 Python 3.12 推理环境
 uv python install 3.12
 uv venv --python 3.12 .venv-embed
 uv pip install --python .venv-embed/bin/python \
   sentence-transformers sentencepiece fastapi uvicorn
 
-# 3) 启动 OpenAI 兼容的 /v1/embeddings 服务
+# 3) 启动 OpenAI 兼容的 /v1/embeddings 与 /v1/rerank 服务
 .venv-embed/bin/uvicorn scripts.embed_server:app --host 127.0.0.1 --port 8010
 ```
 
@@ -541,6 +554,14 @@ uv pip install --python .venv-embed/bin/python \
 EMBEDDING_BASE_URL=http://127.0.0.1:8010/v1
 EMBEDDING_MODEL=bge-m3
 EMBEDDING_API_KEY=local
+
+# 多路召回 + rerank
+RERANK_ENABLED=true
+RERANK_BASE_URL=http://127.0.0.1:8010/v1
+RERANK_MODEL=bge-reranker-base
+RERANK_TIMEOUT=10.0
+RERANK_TOP_N=20
+RERANK_RETRY_COOLDOWN=60
 ```
 
 验证：
@@ -552,6 +573,11 @@ curl -s http://127.0.0.1:8010/v1/embeddings \
   | python -c "import sys,json;print(len(json.load(sys.stdin)['data'][0]['embedding']))"
 # 1024
 
+curl -s http://127.0.0.1:8010/v1/rerank \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"基金风险","documents":["基金有市场风险","今天天气很好"]}'
+# 模型存在时返回 results；不存在时返回 503，主项目自动降级为词项重排
+
 PYTHONPATH=. .venv-py315/bin/python demos/module05_demo.py --embed
 # {'documents': 2, 'dimensions': [1024, 1024]}
 ```
@@ -560,9 +586,57 @@ PYTHONPATH=. .venv-py315/bin/python demos/module05_demo.py --embed
 
 - 服务端使用 `normalize_embeddings=True` 做 L2 归一化，与 `rag_retrieval.py` 的 Milvus `L2` 索引匹配。BGE-M3 是 **1024 维**，换 embedding 模型必须重建 `claims_*` collection，否则维度不匹配；`ClaimVectorStore` 默认 `drop_old=False`，不会自动清理。
 - 服务加载本地权重时会强制离线（`HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`）。否则 `transformers` 会尝试连接 `huggingface.co`，在无法访问该站点的网络下启动会卡数分钟。
-- `models/bge-m3/` 已加入 `.gitignore`，不会把 2GB 权重提交进仓库。
+- `models/bge-m3/`、`models/bge-reranker*/` 已加入 `.gitignore`，不会把模型权重提交进仓库。
+- **BM25 不是 reranker**：BM25 负责词法召回；rerank 使用 BGE-Reranker（Cross-Encoder）对 `query + document` 成对打分。当前开发机 BGE-Reranker 已启用，正常检索返回 `retrieval.rerank_fallback=false`；服务不可用时才降级为词项重排并返回 `true`。
 - 不想引入 Python 环境时，也可用 Ollama：`ollama pull bge-m3`，然后把 `EMBEDDING_BASE_URL` 指向 `http://127.0.0.1:11434/v1`。
-- 以上只验证了 embedding 服务；完整向量入库/检索还需要可用的 Milvus，见「追踪、基础设施及部署」。本机验证组合：macOS arm64 + Python 3.12.15 + sentence-transformers 6.2.0 + torch 2.14.1，单条短文本约 0.5s、冷启动约 2s（不含首次下载）。
+- 以上已验证 embedding 与 BGE-Reranker 的 `/v1/rerank`；向量入库/检索需要 Milvus：本地 macOS/Linux 可直接用下一节的 Milvus Lite，生产用 standalone（见「追踪、基础设施及部署」）。本机验证组合：macOS arm64 + Python 3.12.15 + sentence-transformers 6.2.0 + torch 2.14.1，单条短文本约 0.5s、冷启动约 2s（不含首次下载）。
+
+### 本地 Milvus Lite（可选，macOS/Linux）
+
+Milvus standalone : Milvus Lite ≈ PostgreSQL : SQLite。Lite 把向量引擎嵌入 Python 进程，不需要 Docker / etcd / MinIO，适合单机开发；`ClaimVectorStore`、`InvestmentWikiVectorStore` 和通用 `KnowledgeVectorStore` 只换 `VECTOR_STORE_URI`，代码不用改。
+
+```ini
+VECTOR_STORE_URI=./.data/milvus.db
+```
+
+- 首次使用会自动创建 `.data/milvus.db/` 目录，后续启动直接复用。
+- **单进程**：不要开多个 uvicorn worker，也不要同时运行两个应用实例写同一个 `.db`。
+- **仅 macOS/Linux**：Windows 不支持 `milvus-lite`，继续用外部 Milvus，或把向量库指向独立服务。
+- 切回 Docker/远程 Milvus：删除 `VECTOR_STORE_URI`，或设为 `http://127.0.0.1:19530`。
+- **不要把 `.db` 路径写进 `MILVUS_URI`**：`pymilvus` 导入时会读取 `.env` 里的 `MILVUS_URI` 作为全局默认连接，本地路径会被判定为非法 URI；`VECTOR_STORE_URI` 才是应用实际使用的地址。
+- 投资知识库的 `tools/investment_rag.py` 会把 `.db` 路径识别为本地库，跳过 TCP 探活；向量库不可用时降级为 BM25 + 元数据，Reranker 不可用时再降级为词项重排。
+- 本机已验证：`pymilvus 2.6.9 + milvus-lite 3.2.2 + faiss-cpu 1.15.1 + pyarrow 26.0.0`，`ClaimVectorStore` 的 add / update / search / version 过滤 / drop 均正常；投资知识库 69 个 chunk 可建索引并重复 `upsert`。
+- `IVF_FLAT + nlist=1024` 在 Lite 下可用；数据量很小时会出现 `clustering ... please provide at least ... training points` 警告，不影响结果，数据量上来后消失。追求更简单可把索引换成 `FLAT`。
+- Lite 首次建连/搜索时可能打印 gRPC `fork` 或 `FD from fork parent` 日志，单进程开发环境可忽略。
+
+### 通用知识库 RAG 快速开始
+
+```bash
+# 1) 把业务文档放进 data/knowledge_base/（支持 .md/.txt/.pdf/.docx/.html）
+# 2) 构建通用知识库向量索引（embedding 服务需先启动）
+python scripts/build_knowledge_rag.py --domain general
+
+# 3) 启动应用
+PYTHONPATH=. .venv-py315/bin/python -m uvicorn app:app --port 8001
+```
+
+检索：
+
+```bash
+curl -s http://127.0.0.1:8001/api/rag/search \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"general","question":"多路召回和 rerank 是什么？","top_k":3}'
+```
+
+回答：
+
+```bash
+curl -s http://127.0.0.1:8001/api/rag/answer \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"general","question":"多路召回和 rerank 是什么？","top_k":3}'
+```
+
+`retrieval` 字段会显示每一路命中数、融合候选数、是否 rerank、是否降级；回答接口会校验 `citation_ids` 只能来自本轮检索结果。完整说明见 [docs/knowledge-rag.md](docs/knowledge-rag.md)。
 
 ## 业务、RAG与记忆接入
 
@@ -571,7 +645,8 @@ PYTHONPATH=. .venv-py315/bin/python demos/module05_demo.py --embed
 - 写工具只有服务端authorize核对案件、金额、收款方等参数后才入Outbox。通知也需要审批。消费者须向下游传递相同幂等键并对账。
 - `load_documents`要求险种、版本、生效日期；`ClaimVectorStore`默认不删除旧集合。混合检索使用加权RRF，重排通过已核实的reranker函数注入。扫描PDF需另接OCR。
 - 判责条款检索（RAG）：`WorkflowServices(backend, clause_retriever=...)` 注入 `build_clause_retriever(HybridRetriever(...), insurance_type=...)` 后，三专家判责会先检索适用条款注入 prompt，专家在 `clause_ids` 中引用；引用必须落在已检索条款内，否则拒绝。未配置或检索失败自动降级为无条款，不阻断判责。
-- 投资知识库 RAG：`data/investment_wiki/` 存放公开投资者教育 Wiki；`tools/investment_rag.py` 用 BM25 + BGE-M3/Milvus 做加权 RRF 混合检索。投资咨询对话会先检索知识并注入 `[K1]` 引用；向量服务不可用时自动降级 BM25。`POST /api/investment/rag/search` 可只读检索；`python scripts/build_investment_rag.py` 构建向量索引。详见 [docs/investment-rag.md](docs/investment-rag.md)。
+- 投资知识库 RAG：`data/investment_wiki/` 存放公开投资者教育 Wiki；`tools/investment_rag.py` 复用通用知识库的 **BGE-M3 向量 + BM25 + 元数据** 三路召回与加权 RRF，再交给 BGE-Reranker 精排。投资咨询对话会先检索知识并注入 `[K1]` 引用；向量/rerank 服务不可用时自动降级。`POST /api/investment/rag/search` 可只读检索；`python scripts/build_investment_rag.py` 构建向量索引。详见 [docs/investment-rag.md](docs/investment-rag.md)。
+- 通用知识库 RAG：`data/knowledge_base/` 支持 Markdown/TXT/PDF/DOCX/HTML，`tools/knowledge_rag.py` 实现 **dense + BM25 + 元数据三路召回 → 加权 RRF → BGE-Reranker → Top-K/LLM 回答**。接口：`POST /api/rag/search`（片段 + 引用 + 召回诊断）、`POST /api/rag/answer`（答案 + citation_ids 校验）、`GET /api/rag/domains`。`python scripts/build_knowledge_rag.py --domain general` 构建索引；模型/服务不可用时自动降级为词项重排。详见 [docs/knowledge-rag.md](docs/knowledge-rag.md)。
 - `ClaimContextManager`可注入Redis客户端、摘要链和实体抽取器；Qwen需注入匹配模型的token_counter，默认cl100k_base只作教学计数，首次使用需准备tiktoken缓存。
 
 ## 追踪、基础设施及部署

@@ -1,12 +1,14 @@
-"""投资领域 RAG：Markdown Wiki + BM25 + BGE-M3/Milvus 混合检索。
+"""投资领域 RAG：Markdown Wiki + 三路召回 + RRF + BGE-Reranker。
 
-知识源位于 ``data/investment_wiki``，按章节切分后同时进入两路召回：
+知识源位于 ``data/investment_wiki``，按章节切分后同时进入三路召回：
 
 1. BM25：关键词、产品名、风险等级、费用等精确匹配；
-2. BGE-M3 + Milvus：语义相似条款召回。
+2. BGE-M3 + Milvus：语义相似条款召回；
+3. 元数据：标题、章节、主题、来源路径匹配。
 
-两路结果通过加权 RRF 融合。向量服务或 Milvus 未启动时自动降级为
-BM25，并在调用链路中标记 ``degraded``，不会阻断投资问答。
+三路结果通过加权 RRF 融合，再交给 BGE-Reranker 精排。向量服务或 Milvus
+未启动时自动降级为 BM25 + 元数据；Reranker 不可用时降级为词项重排，
+不会阻断投资问答。
 """
 
 from __future__ import annotations
@@ -15,25 +17,25 @@ import hashlib
 import json
 import logging
 import re
-import socket
 import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from settings import Settings
-from tools.rag_retrieval import HybridRetriever, create_embeddings
+from tools.knowledge_rag import KnowledgeBase
+from tools.rerank import Reranker, build_reranker
+from tools.vector_store import KnowledgeVectorStore, milvus_reachable
 
 logger = logging.getLogger(__name__)
 
 WIKI_DIR = Path(__file__).resolve().parent.parent / 'data' / 'investment_wiki'
 DEFAULT_COLLECTION = 'investment_wiki'
 DEFAULT_TOP_K = 4
-DEFAULT_WEIGHTS = (0.65, 0.35)
+DEFAULT_WEIGHTS = (0.55, 0.30, 0.15)
 
 
 def _manifest_entries(root: Path) -> list[dict[str, Any]]:
@@ -133,22 +135,10 @@ def _manifest_version(root: Path) -> str:
         return ''
 
 
-def _milvus_reachable(uri: str, timeout: float = 0.4) -> bool:
-    """快速判断 Milvus 端口是否可达，避免每次请求都等待连接超时。"""
-    target = uri if '://' in uri else f'http://{uri}'
-    parsed = urlsplit(target)
-    host = parsed.hostname
-    if not host:
-        return False
-    port = parsed.port or (443 if parsed.scheme == 'https' else 19530)
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
+_milvus_reachable = milvus_reachable
 
 
-class InvestmentWikiVectorStore:
+class InvestmentWikiVectorStore(KnowledgeVectorStore):
     """投资 Wiki 的 Milvus 集合；使用 BGE-M3 生成向量。"""
 
     def __init__(
@@ -158,41 +148,20 @@ class InvestmentWikiVectorStore:
         embeddings: Any = None,
         uri: str | None = None,
     ) -> None:
-        from langchain_milvus import Milvus
-
-        cfg = Settings()
-        self.collection_name = collection_name
-        self.store = Milvus(
-            embedding_function=embeddings or create_embeddings(),
+        super().__init__(
             collection_name=collection_name,
-            connection_args={'uri': uri or cfg.milvus_uri},
-            index_params={'index_type': 'IVF_FLAT', 'metric_type': 'L2', 'params': {'nlist': 1024}},
-            search_params={'metric_type': 'L2', 'params': {'nprobe': 16}},
-            enable_dynamic_field=True,
-            auto_id=False,
-            drop_old=False,
+            embeddings=embeddings,
+            uri=uri,
         )
 
-    def upsert(self, documents: Sequence[Document]) -> Any:
-        if not documents:
-            return []
-        ids = [str(document.metadata['doc_id']) for document in documents]
-        return self.store.upsert(ids=ids, documents=list(documents))
-
-    def add(self, documents: Sequence[Document]) -> Any:
-        if not documents:
-            return []
-        ids = [str(document.metadata['doc_id']) for document in documents]
-        return self.store.add_documents(documents=list(documents), ids=ids)
-
-    def search(self, query: str, k: int = DEFAULT_TOP_K) -> list[Document]:
-        if not query.strip() or not 1 <= k <= 20:
-            raise ValueError('投资知识库查询或 top_k 不合法')
-        return self.store.similarity_search(query, k=k)
+    def search(self, query: str, k: int = DEFAULT_TOP_K, *, filters: dict[str, Any] | None = None) -> list[Document]:
+        if not 1 <= k <= 20:
+            raise ValueError('投资知识库 top_k 不合法')
+        return super().search(query, k, filters=filters)
 
 
-class InvestmentKnowledgeBase:
-    """投资知识库的混合检索封装；向量不可用时保留 BM25。"""
+class InvestmentKnowledgeBase(KnowledgeBase):
+    """投资知识库的混合检索封装；向量不可用时保留 BM25/元数据。"""
 
     def __init__(
         self,
@@ -200,97 +169,20 @@ class InvestmentKnowledgeBase:
         *,
         vector_search: Callable[[str, int], list[Document]] | None = None,
         vector_factory: Callable[[], Callable[[str, int], list[Document]]] | None = None,
-        weights: tuple[float, float] = DEFAULT_WEIGHTS,
-        reranker: Callable[[str, list[Document]], list[Document]] | None = None,
+        weights: tuple[float, ...] = DEFAULT_WEIGHTS,
+        reranker: Reranker | None = None,
         collection_name: str = DEFAULT_COLLECTION,
+        candidate_multiplier: int = 4,
     ) -> None:
-        if not documents:
-            raise ValueError('投资知识库至少需要一篇文档')
-        self.documents = list(documents)
-        self.collection_name = collection_name
-        self._vector_search = vector_search
-        self._vector_factory = vector_factory
-        self._vector_ready = vector_search is not None
-        self._vector_attempted = vector_search is not None
-        self._vector_error: str | None = None
-        self._lock = threading.Lock()
-        self._hybrid = HybridRetriever(
-            self._search_vector,
-            self.documents,
+        super().__init__(
+            documents,
+            vector_search=vector_search,
+            vector_factory=vector_factory,
             weights=weights,
             reranker=reranker,
+            collection_name=collection_name,
+            candidate_multiplier=candidate_multiplier,
         )
-
-    def _ensure_vector(self) -> None:
-        if self._vector_attempted:
-            return
-        with self._lock:
-            if self._vector_attempted:
-                return
-            self._vector_attempted = True
-            if self._vector_factory is None:
-                return
-            try:
-                self._vector_search = self._vector_factory()
-                self._vector_ready = True
-            except Exception as exc:  # noqa: BLE001 - 降级必须捕获取决于外部服务的异常
-                self._vector_search = None
-                self._vector_ready = False
-                self._vector_error = f'{type(exc).__name__}: {exc}'
-                logger.warning('投资知识库向量检索不可用，降级 BM25：%s', self._vector_error)
-
-    def _search_vector(self, query: str, k: int) -> list[Document]:
-        self._ensure_vector()
-        if self._vector_search is None:
-            return []
-        try:
-            return self._vector_search(query, k)
-        except Exception as exc:  # noqa: BLE001 - 单次向量失败不应阻断 BM25
-            self._vector_search = None
-            self._vector_ready = False
-            self._vector_error = f'{type(exc).__name__}: {exc}'
-            logger.warning('投资知识库向量检索失败，本次降级 BM25：%s', self._vector_error)
-            return []
-
-    def retrieve_documents(self, query: str, k: int = DEFAULT_TOP_K) -> list[Document]:
-        if not query.strip():
-            return []
-        return self._hybrid.retrieve(query, k)
-
-    def retrieve(self, query: str, k: int = DEFAULT_TOP_K) -> dict[str, Any]:
-        """返回可直接注入 Prompt 和调用链路的检索结果。"""
-        documents = self.retrieve_documents(query, k)
-        citations = []
-        for index, document in enumerate(documents, 1):
-            metadata = document.metadata
-            citations.append({
-                'citation_id': f'K{index}',
-                'doc_id': str(metadata.get('doc_id') or ''),
-                'title': str(metadata.get('title') or ''),
-                'topic': str(metadata.get('topic') or ''),
-                'chapter': str(metadata.get('chapter') or ''),
-                'source': str(metadata.get('source') or ''),
-                'source_url': str(metadata.get('source_url') or ''),
-                'as_of': str(metadata.get('as_of') or ''),
-                'text': document.page_content,
-            })
-        return {
-            'query': query,
-            'documents': citations,
-            'vector_ready': self._vector_ready,
-            'degraded': not self._vector_ready,
-            'vector_error': self._vector_error,
-            'corpus_size': len(self.documents),
-            'collection': self.collection_name,
-        }
-
-    @property
-    def vector_ready(self) -> bool:
-        return self._vector_ready
-
-    @property
-    def vector_error(self) -> str | None:
-        return self._vector_error
 
 
 def format_investment_context(documents: Sequence[dict[str, Any]]) -> str:
@@ -324,8 +216,8 @@ class InvestmentRAG:
         top_k: int | None = None,
         vector_search: Callable[[str, int], list[Document]] | None = None,
         vector_factory: Callable[[], Callable[[str, int], list[Document]]] | None = None,
-        weights: tuple[float, float] = DEFAULT_WEIGHTS,
-        reranker: Callable[[str, list[Document]], list[Document]] | None = None,
+        weights: tuple[float, ...] = DEFAULT_WEIGHTS,
+        reranker: Reranker | None = None,
     ) -> None:
         cfg = Settings()
         self.collection_name = collection_name or cfg.investment_rag_collection
@@ -333,13 +225,15 @@ class InvestmentRAG:
         self.documents = load_investment_documents(root)
         if vector_search is None and vector_factory is None:
             vector_factory = self._default_vector_factory(self.collection_name)
+        self.reranker = reranker if reranker is not None else build_reranker(cfg)
         self.knowledge = InvestmentKnowledgeBase(
             self.documents,
             vector_search=vector_search,
             vector_factory=vector_factory,
             weights=weights,
-            reranker=reranker,
+            reranker=self.reranker,
             collection_name=self.collection_name,
+            candidate_multiplier=cfg.rag_candidate_multiplier,
         )
 
     @staticmethod
@@ -367,6 +261,7 @@ class InvestmentRAG:
             'corpus_size': len(self.documents),
             'vector_ready': self.vector_ready,
             'vector_error': self.vector_error,
+            'reranker': type(self.reranker).__name__ if self.reranker is not None else None,
         }
 
 

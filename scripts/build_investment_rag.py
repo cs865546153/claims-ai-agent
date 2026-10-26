@@ -2,7 +2,7 @@
 
 前置条件：
 1. BGE-M3 Embedding 服务可访问（EMBEDDING_BASE_URL）；
-2. Milvus 可访问（MILVUS_URI）。
+2. Milvus 或本地 Milvus Lite 可访问（VECTOR_STORE_URI，未设置时回退 MILVUS_URI）。
 
 运行：
     python scripts/build_investment_rag.py

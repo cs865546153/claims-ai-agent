@@ -109,6 +109,7 @@ class InvestmentRAGCitation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     citation_id: str
     doc_id: str
+    domain: str = ""
     title: str
     topic: str = ""
     chapter: str
@@ -129,3 +130,4 @@ class InvestmentRAGResponse(BaseModel):
     vector_error: str | None = None
     corpus_size: int = 0
     collection: str = "investment_wiki"
+    retrieval: dict[str, Any] = Field(default_factory=dict)

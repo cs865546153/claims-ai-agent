@@ -10,6 +10,7 @@ services:
       LOCAL_LLM_BASE_URL: ${DOCKER_LLM_BASE_URL:-http://host.docker.internal:8000/v1}
       EMBEDDING_BASE_URL: ${DOCKER_EMBEDDING_BASE_URL:-http://host.docker.internal:8000/v1}
       MILVUS_URI: http://milvus:19530
+      VECTOR_STORE_URI: http://milvus:19530
       REDIS_URL: redis://redis:6379/0
       CLAIMS_CHECKPOINT_DB: /app/.data/checkpoints.sqlite
     extra_hosts: ["host.docker.internal:host-gateway"]
