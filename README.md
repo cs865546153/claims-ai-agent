@@ -181,6 +181,21 @@ uvicorn app:app --host 127.0.0.1 --port 8001 --reload \
 - 接口文档：<http://127.0.0.1:8001/docs>
 - 检查点库：首次启动自动创建 `.data/checkpoints.sqlite`
 - 审计库：首次启动自动创建 `.data/audit.sqlite`（只追加 + 哈希链）
+- 应用日志：默认 `.data/logs/app.log`（由 `.env` 的 `LOG_FILE` 控制，单文件 10MB、保留 5 份）
+- uvicorn 日志：默认 `.data/logs/uvicorn.log`（`scripts/start_mac.sh` 会自动 tee）
+
+**日志落盘**
+
+- 应用日志默认 `.data/logs/app.log`；目录不存在会自动创建。
+- `LOG_MAX_BYTES` 控制单文件上限（默认 10MB），`LOG_BACKUP_COUNT` 控制保留份数（默认 5）；`LOG_MAX_BYTES=0` 关闭轮转。
+- `scripts/start_mac.sh` 会同时把 uvicorn 输出写入 `.data/logs/uvicorn.log`。
+- 手动启动时如需把 uvicorn 日志也落盘：
+
+```bash
+mkdir -p .data/logs
+LOG_FILE=.data/logs/app.log uvicorn app:app --host 127.0.0.1 --port 8001 --reload \
+  2>&1 | tee -a .data/logs/uvicorn.log
+```
 
 **热重载说明**
 
@@ -488,7 +503,7 @@ CORS → RequestID → 认证 → 请求体上限 → 限流 → 审计 → 业�
 | 认证 | `/api/*` 除 `/api/demo/*` 外由接入层校验 `X-API-Key`（未配置时开发放行，生产启动即失败）；审核类接口另需 `X-Reviewer-Key` | `CLAIMS_API_KEY`、`REVIEWER_API_KEY` |
 | 请求体上限 | 超过上限直接 413，不进入业务 | `HTTP_MAX_BODY_BYTES`（默认 64MB） |
 | 限流 | 按「身份 + 来源 IP + 接口类别」分桶，流式与单证接口独立配额；超限返回 429 + `Retry-After` | `HTTP_RATE_LIMIT_PER_MINUTE`（1200）、`HTTP_STREAM_RATE_LIMIT_PER_MINUTE`（120）、`HTTP_DOCUMENT_RATE_LIMIT_PER_MINUTE`（120）、`HTTP_RATE_LIMIT_ENABLED` |
-| 审计 | 每条业务请求落库：request_id、身份、状态码、耗时、脱敏入参、IP 哈希；只追加 + 哈希链，可检测篡改 | `CLAIMS_AUDIT_DB`（默认 `.data/audit.sqlite`，测试用 `:memory:`） |
+| 审计 | 每条业务请求落库：request_id、身份、状态码、耗时、脱敏入参、IP 哈希；RAG 请求额外记录 `details.retrieval`（各路命中、融合数、重排候选、降级标志、最终引用）；只追加 + 哈希链，可检测篡改 | `CLAIMS_AUDIT_DB`（默认 `.data/audit.sqlite`，测试用 `:memory:`） |
 | 异常兜底 | 未处理异常返回 500 JSON + request_id，不返回堆栈；SSE 已开始输出时不重复写响应 | — |
 
 审计脱敏在落库前统一执行：手机号、身份证、银行卡等替换为占位符。请求体只在 JSON 且不超过 64KB 时截取摘要，不落原始文件、不落 `X-API-Key`。
@@ -605,7 +620,7 @@ VECTOR_STORE_URI=./.data/milvus.db
 - 切回 Docker/远程 Milvus：删除 `VECTOR_STORE_URI`，或设为 `http://127.0.0.1:19530`。
 - **不要把 `.db` 路径写进 `MILVUS_URI`**：`pymilvus` 导入时会读取 `.env` 里的 `MILVUS_URI` 作为全局默认连接，本地路径会被判定为非法 URI；`VECTOR_STORE_URI` 才是应用实际使用的地址。
 - 投资知识库的 `tools/investment_rag.py` 会把 `.db` 路径识别为本地库，跳过 TCP 探活；向量库不可用时降级为 BM25 + 元数据，Reranker 不可用时再降级为词项重排。
-- 本机已验证：`pymilvus 2.6.9 + milvus-lite 3.2.2 + faiss-cpu 1.15.1 + pyarrow 26.0.0`，`ClaimVectorStore` 的 add / update / search / version 过滤 / drop 均正常；投资知识库 69 个 chunk 可建索引并重复 `upsert`。
+- 本机已验证：`pymilvus 2.6.9 + milvus-lite 3.2.2 + faiss-cpu 1.15.1 + pyarrow 26.0.0`，`ClaimVectorStore` 的 add / update / search / version 过滤 / drop 均正常；投资知识库 55 个 chunk 可建索引并重复 `upsert`。
 - `IVF_FLAT + nlist=1024` 在 Lite 下可用；数据量很小时会出现 `clustering ... please provide at least ... training points` 警告，不影响结果，数据量上来后消失。追求更简单可把索引换成 `FLAT`。
 - Lite 首次建连/搜索时可能打印 gRPC `fork` 或 `FD from fork parent` 日志，单进程开发环境可忽略。
 
@@ -636,7 +651,7 @@ curl -s http://127.0.0.1:8001/api/rag/answer \
   -d '{"domain":"general","question":"多路召回和 rerank 是什么？","top_k":3}'
 ```
 
-`retrieval` 字段会显示每一路命中数、融合候选数、是否 rerank、是否降级；回答接口会校验 `citation_ids` 只能来自本轮检索结果。完整说明见 [docs/knowledge-rag.md](docs/knowledge-rag.md)。
+`retrieval` 字段会显示每一路命中数、融合候选数、实际重排候选数、是否 rerank、是否降级；同一请求的审计详情 `details.retrieval` 也会保存这些诊断。回答接口会校验 `citation_ids` 只能来自本轮检索结果。完整说明见 [docs/knowledge-rag.md](docs/knowledge-rag.md)。
 
 ## 业务、RAG与记忆接入
 

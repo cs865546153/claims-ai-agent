@@ -37,7 +37,7 @@ data/investment_wiki/*.md
 manifest.json（标题 / 主题 / 日期 / 来源 URL）
         │
         ▼
-按 ## 章节切分 + 600 字窗口 / 80 字重叠
+按 ## 章节切分 + 标题前言合并 + 参考资料过滤 + 600 字窗口 / 80 字重叠
         │
         ├── BM25 索引（中文单字 + bigram）
         ├── 标题 / 章节 / 主题 / 来源元数据
@@ -68,7 +68,9 @@ INVESTMENT_ADVISOR_PROMPT + INVESTMENT_RAG_USAGE_PROMPT
 
 Rerank 是否降级看 `/api/investment/rag/search` 返回的 `retrieval.rerank_fallback`，
 它不会把 `done` 改成 `compat`。当前开发机已下载 BGE-Reranker，正常请求为
-`rerank_fallback=false`。
+`rerank_fallback=false`。重排候选池与 `RERANK_TOP_N` 对齐，默认最多 20 条融合
+候选进入 BGE；实际条数见 `retrieval.rerank_candidates`。同一请求的审计详情
+`details.retrieval` 也会保存召回、融合、重排和最终引用摘要。
 
 ---
 
@@ -176,7 +178,7 @@ python scripts/build_investment_rag.py
 `curl -s http://127.0.0.1:8010/health` 查看 `reranker_available` / `reranker_loaded`。
 新环境安装命令见 [docs/knowledge-rag.md](knowledge-rag.md) 的「Rerank」章节。
 
-脚本使用 `upsert`，可以重复执行更新同一批 `doc_id`。如果更换 embedding 模型或维度，需要先删除旧 collection，再重新构建。
+脚本使用 `upsert`，可以重复执行更新同一批 `doc_id`。如果更换 embedding 模型或维度，需要先删除旧 collection，再重新构建。修改 Markdown 切块规则也会改变 `doc_id`，`upsert` 不会清理旧 chunk，因此同样要先删除 `investment_wiki` collection，避免旧标题块/参考资料块继续被 dense 召回。
 
 ---
 
@@ -225,6 +227,10 @@ python scripts/build_investment_rag.py
   "collection": "investment_wiki",
   "retrieval": {
     "weights": {"dense": 0.55, "bm25": 0.30, "metadata": 0.15},
+    "route_hits": {"dense": 16, "bm25": 16, "metadata": 16},
+    "fused_count": 26,
+    "rerank_candidates": 20,
+    "rerank_top_n": 20,
     "reranked": true,
     "rerank_fallback": false,
     "rerank_error": null

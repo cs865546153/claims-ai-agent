@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from langchain_core.documents import Document
 
 from settings import Settings
+from tools.milvus_conn import milvus_connection_args
 from tools.rag_retrieval import create_embeddings
 
 COLLECTION_PATTERN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,254}$')
@@ -76,7 +77,7 @@ class KnowledgeVectorStore:
         self.store = Milvus(
             embedding_function=embeddings or create_embeddings(),
             collection_name=collection_name,
-            connection_args={'uri': uri or cfg.milvus_uri},
+            connection_args=milvus_connection_args(uri or cfg.milvus_uri),
             index_params={'index_type': 'IVF_FLAT', 'metric_type': 'L2', 'params': {'nlist': 1024}},
             search_params={'metric_type': 'L2', 'params': {'nprobe': 16}},
             enable_dynamic_field=True,

@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 .venv*
+models/bge-m3
+models/bge-reranker*
 .data
 __pycache__
 **/__pycache__

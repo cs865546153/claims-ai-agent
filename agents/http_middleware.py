@@ -20,7 +20,7 @@ from typing import Any
 from starlette.datastructures import MutableHeaders
 
 from agents.middleware_audit import RateLimitMiddleware, mask_pii
-from logging_setup import request_id_var
+from logging_setup import request_id_var, retrieval_diagnostics_var
 
 LOGGER = logging.getLogger('claims.http')
 
@@ -127,6 +127,8 @@ class EnterpriseHttpMiddleware:
 
         request_id = _request_id(scope)
         token = request_id_var.set(request_id)
+        retrieval_sink: list[dict[str, Any]] = []
+        retrieval_token = retrieval_diagnostics_var.set(retrieval_sink)
         path = scope.get('path', '')
         method = scope.get('method', 'GET')
         started = time.monotonic()
@@ -174,10 +176,14 @@ class EnterpriseHttpMiddleware:
             if 'status' not in response_state:
                 await self._reject(send, 500, '服务内部错误', request_id)
         finally:
-            status = int(response_state.get('status', 500))
-            await self._audit(scope, request_id, actor, method, path, status,
-                              (time.monotonic() - started) * 1000, body_excerpt, error)
-            request_id_var.reset(token)
+            try:
+                status = int(response_state.get('status', 500))
+                await self._audit(scope, request_id, actor, method, path, status,
+                                  (time.monotonic() - started) * 1000, body_excerpt, error,
+                                  retrieval=retrieval_sink)
+            finally:
+                retrieval_diagnostics_var.reset(retrieval_token)
+                request_id_var.reset(token)
 
     def _authenticate(self, scope: dict[str, Any], path: str) -> str | tuple[int, str]:
         api_key = _header(scope, 'x-api-key')
@@ -252,7 +258,8 @@ class EnterpriseHttpMiddleware:
         return path not in _SKIP_AUDIT_PATHS and not path.startswith(_SKIP_AUDIT_PREFIXES)
 
     async def _audit(self, scope: dict[str, Any], request_id: str, actor: str, method: str,
-                     path: str, status: int, latency_ms: float, body: Any, error: str | None) -> None:
+                     path: str, status: int, latency_ms: float, body: Any, error: str | None,
+                     *, retrieval: list[dict[str, Any]] | None = None) -> None:
         if not self._should_audit(path):
             return
         body_text = ''
@@ -273,6 +280,8 @@ class EnterpriseHttpMiddleware:
             'body': body,
             'error': error,
         }
+        if retrieval:
+            details['retrieval'] = retrieval
         try:
             await asyncio.to_thread(
                 store.record,

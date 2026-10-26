@@ -11,7 +11,7 @@
   CORS -> RequestID -> 认证 -> 体积上限 -> 限流 -> 审计 -> 500 兜底
   认证：/api/* 校验 X-API-Key；生产启动强制配置密钥
   限流：身份 + IP + 接口类别（进程内；多副本需 Redis）
-  审计：脱敏入参写入 audit.sqlite，只追加 + 哈希链
+  审计：脱敏入参 + RAG 检索诊断写入 audit.sqlite，只追加 + 哈希链
        |
        v
 【路由层】 app.py (FastAPI) —— 纯 URL 静态匹配，无大模型

@@ -18,6 +18,7 @@ from rank_bm25 import BM25Okapi
 
 from models.schemas import Contract
 from settings import Settings
+from tools.milvus_conn import milvus_connection_args
 
 
 def load_documents(path: Path, *, insurance_type: str, version: str, effective_date: str) -> list[Document]:
@@ -78,7 +79,8 @@ class ClaimVectorStore:
         from langchain_milvus import Milvus
         self.insurance_type = insurance_type
         self.store = Milvus(embedding_function=embeddings or create_embeddings(),
-            collection_name='claims_' + insurance_type, connection_args={'uri': uri or Settings().milvus_uri},
+            collection_name='claims_' + insurance_type,
+            connection_args=milvus_connection_args(uri or Settings().milvus_uri),
             index_params={'index_type': 'IVF_FLAT', 'metric_type': 'L2', 'params': {'nlist': 1024}},
             search_params={'metric_type': 'L2', 'params': {'nprobe': 16}},
             enable_dynamic_field=True, auto_id=False, drop_old=False)

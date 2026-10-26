@@ -27,6 +27,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rank_bm25 import BM25Okapi
 
+from logging_setup import retrieval_diagnostics_var
 from settings import Settings
 from tools.rag_retrieval import RAGAnswer, chinese_tokens
 from tools.rerank import Reranker, build_reranker
@@ -77,6 +78,66 @@ def _first_heading(text: str, fallback: str) -> str:
     return fallback
 
 
+_REFERENCE_HEADING_RE = re.compile(r'^(?:参考资料|参考来源|参考文献|延伸阅读|相关链接)\s*$')
+_LOW_VALUE_HEADING_RE = re.compile(r'^(?:风险提示|免责声明|免责条款)\s*$')
+_MIN_LOW_VALUE_SECTION_CHARS = 80
+
+
+def _section_chapter(text: str, fallback: str) -> str:
+    """取章节正文里的第一个二级标题；前言已合并进首章时不会退回文档标题。"""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('## '):
+            title = stripped[2:].strip()
+            if title:
+                return title
+    return fallback
+
+
+def _section_body_length(text: str) -> int:
+    """去掉 URL、Markdown 标记和空白后估算正文长度。"""
+    body = re.sub(r'https?://\S+', '', text)
+    body = re.sub(r'[#>*_`~\-\s]', '', body)
+    return len(body)
+
+
+def _is_low_value_section(chapter: str, text: str) -> bool:
+    """过滤纯参考资料，以及只有一句话的风险提示/免责声明。"""
+    if _REFERENCE_HEADING_RE.match(chapter.strip()):
+        return True
+    if _LOW_VALUE_HEADING_RE.match(chapter.strip()):
+        return _section_body_length(text) < _MIN_LOW_VALUE_SECTION_CHARS
+    return False
+
+
+def split_markdown_sections(text: str, title: str) -> list[tuple[str, str]]:
+    """按二级标题切分 Markdown，返回 ``(chapter, text)``。
+
+    文件开头的标题、免责声明等前言不单独成块，而是合并到第一个 ``##`` 章节，
+    避免“只有标题/免责声明”的薄块排到 Top-1。纯参考资料块不进入索引。
+    """
+    raw = [part.strip() for part in re.split(r'(?m)(?=^##\s+)', text) if part.strip()]
+    if not raw:
+        return []
+    if raw[0].startswith('##'):
+        sections = raw
+    else:
+        preamble = raw[0]
+        sections = raw[1:]
+        if not sections:
+            sections = [preamble]
+        else:
+            sections[0] = f'{preamble}\n\n{sections[0]}'
+
+    result: list[tuple[str, str]] = []
+    for section in sections:
+        chapter = _section_chapter(section, title)
+        if _is_low_value_section(chapter, section):
+            continue
+        result.append((chapter, section))
+    return result
+
+
 def _read_pdf_pages(path: Path) -> list[tuple[str, str]]:
     from pypdf import PdfReader
 
@@ -120,15 +181,7 @@ def _source_sections(path: Path, title: str) -> list[tuple[str, str]]:
         return []
     if suffix not in {'.md', '.markdown'}:
         return [(title, text)]
-    sections: list[tuple[str, str]] = []
-    for section in re.split(r'(?m)(?=^##\s+)', text):
-        section = section.strip()
-        if not section:
-            continue
-        first_line = section.splitlines()[0].strip()
-        chapter = first_line.lstrip('#').strip() if first_line.startswith('##') else title
-        sections.append((chapter, section))
-    return sections
+    return split_markdown_sections(text, title)
 
 
 def load_knowledge_documents(root: Path | None = None, *, domain: str = 'general') -> list[Document]:
@@ -341,8 +394,16 @@ class MultiRouteRetriever:
         reranked = False
         rerank_fallback = False
         rerank_error: str | None = None
+        rerank_candidates = 0
+        rerank_top_n = getattr(self.reranker, 'top_n', None) if self.reranker is not None else None
         if self.reranker is not None and fused:
-            candidates = fused[:max(k * 3, k)]
+            limit = (
+                rerank_top_n
+                if isinstance(rerank_top_n, int) and rerank_top_n > 0
+                else max(k * 3, k)
+            )
+            candidates = fused[:max(k, min(len(fused), limit))]
+            rerank_candidates = len(candidates)
             candidate_ids = {_document_key(doc, '') for doc in candidates}
             try:
                 ordered = self.reranker(query, candidates)
@@ -389,6 +450,8 @@ class MultiRouteRetriever:
                 'route_hits': route_hits,
                 'route_errors': route_errors,
                 'fused_count': len(fused),
+                'rerank_candidates': rerank_candidates,
+                'rerank_top_n': rerank_top_n,
                 'reranked': reranked,
                 'rerank_fallback': rerank_fallback,
                 'reranker': type(self.reranker).__name__ if self.reranker is not None else None,
@@ -520,6 +583,36 @@ class KnowledgeBase:
                 'as_of': str(metadata.get('as_of') or ''),
                 'text': document.page_content,
             })
+
+        retrieval_event = {
+            'collection': self.collection_name,
+            'vector_ready': self._vector_ready,
+            'corpus_size': len(self.documents),
+            'candidate_k': result.diagnostics.get('candidate_k'),
+            'route_hits': result.diagnostics.get('route_hits'),
+            'route_errors': result.diagnostics.get('route_errors'),
+            'fused_count': result.diagnostics.get('fused_count'),
+            'rerank_candidates': result.diagnostics.get('rerank_candidates'),
+            'reranked': result.diagnostics.get('reranked'),
+            'rerank_fallback': result.diagnostics.get('rerank_fallback'),
+            'rerank_error': result.diagnostics.get('rerank_error'),
+            'returned': result.diagnostics.get('returned'),
+            'citations': [
+                {
+                    'citation_id': citation['citation_id'],
+                    'doc_id': citation['doc_id'],
+                    'title': citation['title'],
+                    'chapter': citation['chapter'],
+                    'source': citation['source'],
+                }
+                for citation in citations
+            ],
+        }
+        sink = retrieval_diagnostics_var.get()
+        if sink is not None:
+            sink.append(retrieval_event)
+        logger.info('rag.retrieval %s', json.dumps(retrieval_event, ensure_ascii=False, default=str))
+
         return {
             'query': query,
             'documents': citations,
@@ -781,4 +874,5 @@ __all__ = [
     'get_knowledge_rag',
     'load_knowledge_documents',
     'reset_knowledge_rag',
+    'split_markdown_sections',
 ]

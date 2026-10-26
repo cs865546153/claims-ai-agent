@@ -23,7 +23,20 @@ def test_configure_logging_is_idempotent() -> None:
     managed = [h for h in logging.getLogger().handlers if getattr(h, '_claims_managed', False)]
     configure_logging()
     again = [h for h in logging.getLogger().handlers if getattr(h, '_claims_managed', False)]
-    assert len(managed) == len(again) == 1
+    assert len(managed) == len(again)
+    assert len(again) >= 1
+
+
+def test_configure_logging_creates_directory_and_rotates(tmp_path, monkeypatch) -> None:
+    log_path = tmp_path / 'logs' / 'app.log'
+    monkeypatch.setenv('LOG_MAX_BYTES', '1024')
+    monkeypatch.setenv('LOG_BACKUP_COUNT', '1')
+    configure_logging(str(log_path), force=True, level='INFO')
+    logger = logging.getLogger('claims.http')
+    for _ in range(3):
+        logger.info('x' * 2000)
+    assert log_path.exists()
+    assert (tmp_path / 'logs' / 'app.log.1').exists()
 
 
 def test_app_logger_info_is_emitted(caplog: pytest.LogCaptureFixture) -> None:

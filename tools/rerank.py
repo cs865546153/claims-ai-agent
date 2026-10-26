@@ -178,6 +178,11 @@ class FallbackReranker:
         self._warned = False
         self.last_error: str | None = None
 
+    @property
+    def top_n(self) -> int | None:
+        """主 reranker 的候选上限；供检索层对齐重排候选池。"""
+        return getattr(self.primary, 'top_n', None)
+
     def __call__(self, query: str, documents: list[Document]) -> list[Document]:
         try:
             result = self.primary(query, documents)

@@ -328,7 +328,7 @@ RouteDecision ──判断──┤
 | 认证 | 接入层强制 `X-API-Key`；`X-Reviewer-Key` 由审核类接口校验；`/api/demo/*` 与探针公开 | — |
 | 限流 | 按「身份 + 来源 IP + 接口类别」分桶：通用 1200/min、流式 120/min、单证 120/min | 每案件 10 令牌、1/s |
 | 脱敏 | 审计落库前统一 `mask_pii`，日志只存 IP 哈希 | 输入/输出/缓存值全部脱敏 |
-| 审计 | append-only + 哈希链（`agents/audit_store.py`），记录 request_id/状态/耗时/脱敏入参 | stdout JSON 明细 |
+| 审计 | append-only + 哈希链（`agents/audit_store.py`），记录 request_id/状态/耗时/脱敏入参；RAG 请求附带 `details.retrieval` 召回与重排诊断 | stdout JSON 明细 |
 | 缓存 | —（暂不做 HTTP 级缓存） | 进程内 TTL，key = 案件 + 输入 + 模型参数 |
 | HITL | — | 打 `requires_manual_review` 标记 |
 | 真正 HITL 闸门 | LangGraph `interrupt()` + `/api/claims/{id}/review` / `/api/investment/{id}/review` + 审核员密钥 | — |

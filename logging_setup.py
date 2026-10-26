@@ -3,7 +3,9 @@
 默认输出到 stderr，与 uvicorn 日志同一终端；可通过环境变量调整：
 
 - ``LOG_LEVEL``：日志级别，默认 INFO。
-- ``LOG_FILE``：追加写入文件，默认只输出到终端。
+- ``LOG_FILE``：追加写入文件；父目录会自动创建，默认只输出到终端。
+- ``LOG_MAX_BYTES`` / ``LOG_BACKUP_COUNT``：日志文件轮转上限与保留份数，
+  默认 10MB × 5；``LOG_MAX_BYTES=0`` 表示关闭轮转。
 - ``LOG_JSON``：1/true 时输出 JSON Lines，便于 Loki/ELK 采集。
 - ``LOG_MODEL_IO``：0/false 关闭模型参数、输入与输出日志，默认开启。
 - ``LOG_MODEL_CONTENT_CHARS``：单条消息/输出的预览上限，默认 800；0 表示不记录正文。
@@ -22,6 +24,8 @@ import sys
 import threading
 import time
 from contextvars import ContextVar
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -30,6 +34,10 @@ from langchain_core.outputs import LLMResult
 
 # 请求 ID 由接入层中间件写入，日志格式统一展示，便于与响应头、审计库串联。
 request_id_var: ContextVar[str] = ContextVar('request_id', default='-')
+# 当前请求的检索诊断收集器；由 HTTP 中间件初始化，RAG 检索完成后追加。
+retrieval_diagnostics_var: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    'retrieval_diagnostics', default=None,
+)
 
 _TEXT_FORMAT = '%(asctime)s %(levelname)-5s %(name)s [%(request_id)s] %(message)s'
 _DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
@@ -47,6 +55,17 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in {'0', 'false', 'no', 'off', ''}
+
+
+def _env_int(name: str, default: int) -> int:
+    """读取非负整数；非法值回退默认值，日志配置不能拖垮服务。"""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return default
 
 
 def _level(value: str | int | None) -> int:
@@ -127,11 +146,31 @@ def configure_logging(path: str | None = None, *, level: str | int | None = None
 
         file_path = path or os.getenv('LOG_FILE', '').strip()
         if file_path:
-            file_handler = logging.FileHandler(file_path, encoding='utf-8')
-            file_handler.setFormatter(formatter)
-            file_handler.addFilter(_RequestFilter())
-            file_handler._claims_managed = True  # type: ignore[attr-defined]
-            root.addHandler(file_handler)
+            log_path = Path(file_path).expanduser()
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                max_bytes = _env_int('LOG_MAX_BYTES', 10 * 1024 * 1024)
+                backup_count = _env_int('LOG_BACKUP_COUNT', 5)
+                if max_bytes > 0:
+                    file_handler = RotatingFileHandler(
+                        log_path,
+                        maxBytes=max_bytes,
+                        backupCount=backup_count,
+                        encoding='utf-8',
+                    )
+                else:
+                    file_handler = logging.FileHandler(log_path, encoding='utf-8')
+            except OSError as exc:
+                # 磁盘/权限问题不能阻断启动；stderr 仍会保留完整日志。
+                logging.getLogger('claims.logging').warning(
+                    '日志文件不可写，已退回终端输出：%s (%s)', log_path, exc,
+                )
+            else:
+                file_handler.setFormatter(formatter)
+                file_handler.addFilter(_RequestFilter())
+                file_handler._claims_managed = True  # type: ignore[attr-defined]
+                root.addHandler(file_handler)
+                file_path = str(log_path)
 
         root.setLevel(target)
         _apply_levels(target)

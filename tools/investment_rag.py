@@ -16,7 +16,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -26,7 +25,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from settings import Settings
-from tools.knowledge_rag import KnowledgeBase
+from tools.knowledge_rag import KnowledgeBase, split_markdown_sections
 from tools.rerank import Reranker, build_reranker
 from tools.vector_store import KnowledgeVectorStore, milvus_reachable
 
@@ -88,13 +87,7 @@ def load_investment_documents(root: Path | None = None) -> list[Document]:
         topic = str(entry.get('topic') or '投资知识')
         source_url = str(entry.get('source_url') or '')
         as_of = str(entry.get('as_of') or '')
-        sections = re.split(r'(?m)(?=^##\s+)', text)
-        for section in sections:
-            section = section.strip()
-            if not section:
-                continue
-            first_line = section.splitlines()[0].strip()
-            chapter = first_line.lstrip('#').strip() if first_line.startswith('##') else title
+        for chapter, section in split_markdown_sections(text, title):
             documents.append(Document(
                 page_content=section,
                 metadata={

@@ -99,6 +99,33 @@ def test_wiki_loads_with_traceable_metadata() -> None:
     assert any('保本保收益' in document.page_content for document in documents)
 
 
+def test_wiki_merges_preamble_and_skips_reference_sections(tmp_path) -> None:
+    (tmp_path / 'manifest.json').write_text(json.dumps({
+        'version': 'test',
+        'documents': [{'file': '01.md', 'title': '投资基础', 'topic': '投资基础'}],
+    }), encoding='utf-8')
+    (tmp_path / '01.md').write_text(
+        '# 投资基础\n\n'
+        '> 本文是教育资料，不构成投资建议。\n\n'
+        '## 1. 投资和储蓄\n\n'
+        '储蓄保值，投资承担波动。\n\n'
+        '## 参考资料\n\n'
+        '- [示例](https://example.com)\n\n'
+        '---\n\n'
+        '风险提示：不构成投资建议。\n',
+        encoding='utf-8',
+    )
+
+    documents = load_investment_documents(tmp_path)
+
+    assert len(documents) == 1
+    document = documents[0]
+    assert document.metadata['chapter'] == '1. 投资和储蓄'
+    assert '本文是教育资料' in document.page_content
+    assert '储蓄保值' in document.page_content
+    assert '参考资料' not in document.page_content
+
+
 def test_hybrid_retrieval_uses_bm25_and_vector_results() -> None:
     documents = _corpus()
     knowledge = InvestmentKnowledgeBase(

@@ -43,7 +43,7 @@ BM25 可以作为 rerank 的一个特征，但不应该替代 Cross-Encoder。
 data/knowledge_base/**/*.md|pdf|docx|html
         │
         ▼
-章节切分 / 600 字窗口 / 80 字重叠 / 可追溯 doc_id
+章节切分 / 标题前言合并 / 参考资料过滤 / 600 字窗口 / 80 字重叠 / 可追溯 doc_id
         │
         ├── BGE-M3 → Milvus（dense 召回）
         ├── BM25（词法召回）
@@ -84,7 +84,9 @@ score(doc) = Σ route_weight / (60 + rank_in_route)
 ```
 
 RRF 只使用排名，不直接相加不同量纲的向量距离、BM25 分数和元数据打分。候选倍数由
-`RAG_CANDIDATE_MULTIPLIER` 控制，默认 4。
+`RAG_CANDIDATE_MULTIPLIER` 控制，默认 4。融合后的候选不会全部进入 Cross-Encoder：
+候选池与 `RERANK_TOP_N` 对齐，默认最多 20 条进入 BGE-Reranker，再从中取 Top-K。
+实际进入重排的条数记录在 `retrieval.rerank_candidates`，便于判断重排是否覆盖了足够候选。
 
 ---
 
@@ -101,6 +103,10 @@ RRF 只使用排名，不直接相加不同量纲的向量距离、BM25 分数�
 失败后默认冷却 60 秒（`RERANK_RETRY_COOLDOWN`），期间直接走词项重排，冷却结束
 自动重试，因此下载模型或重启服务后不需要重启主项目。`retrieval.rerank_error`
 会记录降级原因，`retrieval.rerank_fallback` 标记是否走了兜底。
+
+重排候选池由 `RERANK_TOP_N`（默认 20）和 RRF 融合候选数共同决定：
+`min(fused_count, RERANK_TOP_N)`，且至少保留 Top-K。这样不会再出现“融合了 26 条、
+只有 12 条进入重排”的截断；如果自定义 reranker 没有 `top_n`，则回退到 `k * 3`。
 
 ### 4.1 安装 reranker 模型（当前已安装）
 
@@ -173,6 +179,10 @@ curl -s http://127.0.0.1:8010/v1/rerank \
 python scripts/build_knowledge_rag.py --domain general
 python scripts/build_knowledge_rag.py --domain investment
 ```
+
+修改切块规则会改变 `doc_id`，而 `upsert` 只覆盖同 ID 记录，不会删除旧 chunk；
+升级切块逻辑后应先删除对应 collection 再重建，否则 dense 召回仍可能命中旧标题块
+或参考资料块。首次检索会加载新的 `knowledge_general` 索引。
 
 投资 Wiki 使用 `data/investment_wiki/manifest.json`，集合名 `investment_wiki`。
 通用知识库集合名 `knowledge_general`。
@@ -260,12 +270,20 @@ POST /api/rag/search
     "weights": {"dense": 0.55, "bm25": 0.3, "metadata": 0.15},
     "route_hits": {"dense": 4, "bm25": 4, "metadata": 4},
     "fused_count": 4,
+    "rerank_candidates": 4,
+    "rerank_top_n": 20,
     "reranked": true,
     "rerank_fallback": false,
     "rerank_error": null
   }
 }
 ```
+
+同一请求的审计详情会包含 `details.retrieval`，记录 `route_hits`、`fused_count`、
+`rerank_candidates`、`reranked`、`rerank_fallback`、`rerank_error` 和最终 citations
+的标题/章节/来源。结构化 `rag.retrieval` 同时写入应用日志，默认路径
+`.data/logs/app.log`（可用 `LOG_FILE` 覆盖）。以后排查“最新日志有没有走到多路召回和重排”
+不需要再手工复现。
 
 ### 7.3 回答
 
@@ -310,7 +328,9 @@ python -m pytest tests/test_knowledge_rag.py tests/test_rerank.py -q
 覆盖：
 
 - Markdown 章节加载、README 跳过、doc_id 唯一；
+- 标题前言合并到首章、纯参考资料/短免责声明过滤；
 - 多路 RRF 融合与去重；
+- 重排候选池与 `RERANK_TOP_N` 对齐；
 - 词项 rerank；
 - 向量失败降级；
 - 回答引用校验；

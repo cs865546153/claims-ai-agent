@@ -21,7 +21,7 @@ from tools.knowledge_rag import (
     RetrievalRoute,
     load_knowledge_documents,
 )
-from tools.rerank import LexicalReranker
+from tools.rerank import FallbackReranker, LexicalReranker
 
 
 def _docs() -> list[Document]:
@@ -95,6 +95,28 @@ def test_load_knowledge_documents_skips_readme_and_tracks_sections(tmp_path: Pat
     assert all(document.metadata['source'] == 'guide.md' for document in documents)
 
 
+def test_load_knowledge_documents_merges_preamble_and_skips_references(tmp_path: Path) -> None:
+    (tmp_path / 'guide.md').write_text(
+        '# 指南\n\n'
+        '> 免责声明：仅用于测试。\n\n'
+        '## 召回\n\n'
+        'BM25 和向量召回。\n\n'
+        '## 参考资料\n\n'
+        '- [示例](https://example.com)\n\n'
+        '风险提示：不构成建议。\n',
+        encoding='utf-8',
+    )
+
+    documents = load_knowledge_documents(tmp_path, domain='general')
+
+    assert len(documents) == 1
+    document = documents[0]
+    assert document.metadata['chapter'] == '召回'
+    assert '免责声明' in document.page_content
+    assert 'BM25 和向量召回' in document.page_content
+    assert '参考资料' not in document.page_content
+
+
 def test_multi_route_retriever_fuses_and_deduplicates() -> None:
     first, second = _docs()[:2]
     retriever = MultiRouteRetriever([
@@ -107,6 +129,28 @@ def test_multi_route_retriever_fuses_and_deduplicates() -> None:
     assert [document.metadata['doc_id'] for document in result.documents] == ['fund-risk', 'rag-recall']
     assert result.diagnostics['route_hits'] == {'left': 1, 'right': 2}
     assert result.diagnostics['fused_count'] == 2
+
+
+class _TopNReranker:
+    top_n = 2
+
+    def __call__(self, query: str, documents: list[Document]) -> list[Document]:
+        return list(reversed(documents))
+
+
+def test_rerank_candidate_pool_aligns_with_top_n() -> None:
+    documents = _docs()
+    reranker = FallbackReranker(_TopNReranker())
+    retriever = MultiRouteRetriever([
+        RetrievalRoute('only', 1.0, lambda query, k: documents),
+    ], reranker=reranker)
+
+    result = retriever.retrieve('重新排序', 1)
+
+    assert reranker.top_n == 2
+    assert result.diagnostics['rerank_top_n'] == 2
+    assert result.diagnostics['rerank_candidates'] == 2
+    assert result.documents[0].metadata['doc_id'] == 'rag-recall'
 
 
 def test_lexical_reranker_moves_query_relevant_document_first() -> None:
@@ -191,3 +235,37 @@ def test_rag_search_and_answer_endpoints(monkeypatch: pytest.MonkeyPatch) -> Non
     assert answer.json()['documents']
     assert domains.status_code == 200
     assert domains.json()['domains'][0]['domain'] == 'general'
+
+
+def test_search_audit_records_retrieval_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr('tools.knowledge_rag.milvus_reachable', lambda uri: False)
+    rag = KnowledgeRAG(
+        {'general': KnowledgeSource('general', Path('.'), 'test_general', lambda root: _docs())},
+        top_k=2,
+        reranker=LexicalReranker(),
+    )
+
+    with TestClient(create_app(
+        database=':memory:',
+        investment_rag=False,
+        knowledge_rag=rag,
+        knowledge_model=_AnswerModel(),
+    )) as client:
+        response = client.post('/api/rag/search', json={
+            'domain': 'general',
+            'question': '多路召回和 rerank',
+            'top_k': 2,
+        })
+        assert response.status_code == 200
+        store = client.app.state.audit
+        entry = next(item for item in store.recent(10) if item['resource'] == '/api/rag/search')
+
+    retrieval = entry['details']['retrieval']
+    assert retrieval
+    record = retrieval[0]
+    assert record['collection'] == 'test_general'
+    assert record['route_hits']['dense'] == 0
+    assert record['fused_count'] >= 1
+    assert record['rerank_candidates'] >= 1
+    assert record['reranked'] is True
+    assert record['citations'][0]['citation_id'] == 'K1'
