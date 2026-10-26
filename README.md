@@ -764,8 +764,8 @@ location /ai/ {
 生成密码文件：
 
 ```bash
-# 用户名 ai；密码自行替换
-printf 'ai:%s\n' "$(openssl passwd -apr1 '替换成强密码')" > /etc/nginx/.htpasswd-ai
+# 用户名 admin；密码自行替换
+printf 'admin:%s\n' "$(openssl passwd -apr1 '替换成强密码')" > /etc/nginx/.htpasswd-ai
 chown root:nginx /etc/nginx/.htpasswd-ai
 chmod 640 /etc/nginx/.htpasswd-ai
 nginx -t && systemctl reload nginx
@@ -806,8 +806,8 @@ WantedBy=multi-user.target
 ```bash
 curl -sS http://127.0.0.1:8001/health
 curl -sS http://127.0.0.1:8001/ready
-curl -sS -u 'ai:密码' https://你的域名/ai/health
-curl -sS -u 'ai:密码' -X POST https://你的域名/ai/api/rag/search \
+curl -sS -u 'admin:密码' https://你的域名/ai/health
+curl -sS -u 'admin:密码' -X POST https://你的域名/ai/api/rag/search \
   -H 'Content-Type: application/json' \
   -d '{"domain":"general","question":"多路召回和 rerank 是什么？","top_k":2}'
 ```
