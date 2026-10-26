@@ -53,6 +53,27 @@
 【横切】 接入层：RequestID / 认证 / 限流 / 审计；模型层：脱敏 / 缓存 / 降级；观测：LangFuse / Prometheus / stdout JSON
 ```
 
+## 一·补充、生产部署形态（单机）
+
+```text
+公网
+  |-- 443 nginx
+  |     |-- /study/              -> 静态学习站
+  |     |-- /                    -> trojan-web 面板
+  |     `-- /ai/  (Basic Auth)   -> 127.0.0.1:8001
+  |                                  app 容器（FastAPI / SSE）
+  |                                  `-- http://embed:8010/v1
+  |                                        embedding / reranker 容器
+  |-- 444 trojan
+  `-- 22  SSH
+```
+
+- 应用不监听公网，只绑定 `127.0.0.1:8001`；nginx 负责 TLS、Basic Auth、上传体积和 SSE 不缓冲。
+- `/ai/` 反向代理时去掉前缀：`/ai/api/... -> /api/...`、`/ai/static/... -> /static/...`。前端资源与 API 使用相对路径，因此本地 `/` 和线上 `/ai/` 共用一份代码。
+- BGE-M3 与 BGE-Reranker 放在独立 `embed` 容器，模型以只读 bind mount 挂载；应用和模型服务共享 Compose 网络。
+- `.data/` 使用 bind mount 持久化 Milvus Lite、审计库、检查点和日志。不要多进程写同一个 Milvus Lite 文件。
+- 当前前端不发送 `X-API-Key`，公网入口使用 `APP_ENV=development` + nginx Basic Auth；若要切到 `APP_ENV=production`，必须同时解决前端密钥注入。
+
 ## 二、入口路由：两层，只有一层有大模型判断
 
 ```

@@ -24,7 +24,7 @@ async function api(path, options = {}) {
 
 async function checkHealth() {
   try {
-    await api("/health");
+    await api("health");
     $("healthDot").className = "online";
     $("healthText").textContent = "服务运行正常";
   } catch (_) {
@@ -109,14 +109,14 @@ async function analyzeFiles(files) {
   if (!files.length) return [];
   const form = new FormData();
   files.forEach((file) => form.append("files", file));
-  const response = await api("/api/documents/analyze", { method: "POST", body: form });
+  const response = await api("api/documents/analyze", { method: "POST", body: form });
   return (await response.json()).documents;
 }
 
 async function streamAnswer(question, newDocuments, article) {
   const answer = article.querySelector(".bubble p");
   const intent = article.querySelector(".intent");
-  const response = await api("/api/assistant/stream", {
+  const response = await api("api/assistant/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -213,7 +213,7 @@ async function sendMessage(rawQuestion) {
   }
 }
 
-async function runDemoClaim(endpoint = "/api/demo/claims/process") {
+async function runDemoClaim(endpoint = "api/demo/claims/process") {
   if (state.busy) return;
   state.busy = true;
   $("newChat").disabled = true;
@@ -271,7 +271,7 @@ async function runDemoClaim(endpoint = "/api/demo/claims/process") {
 
 $("attachButton").addEventListener("click", () => $("fileInput").click());
 $("demoCase").addEventListener("click", () => runDemoClaim());
-$("demoCaseLive").addEventListener("click", () => runDemoClaim("/api/demo/claims/process-live"));
+$("demoCaseLive").addEventListener("click", () => runDemoClaim("api/demo/claims/process-live"));
 $("fileInput").addEventListener("change", (event) => selectFiles(event.target.files));
 $("chatForm").addEventListener("submit", (event) => {
   event.preventDefault();

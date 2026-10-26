@@ -652,6 +652,254 @@ curl -s http://127.0.0.1:8001/api/rag/answer \
 - 通用知识库 RAG：`data/knowledge_base/` 支持 Markdown/TXT/PDF/DOCX/HTML，`tools/knowledge_rag.py` 实现 **dense + BM25 + 元数据三路召回 → 加权 RRF → BGE-Reranker → Top-K/LLM 回答**。接口：`POST /api/rag/search`（片段 + 引用 + 召回诊断）、`POST /api/rag/answer`（答案 + citation_ids 校验）、`GET /api/rag/domains`。`python scripts/build_knowledge_rag.py --domain general` 构建索引；模型/服务不可用时自动降级为词项重排。详见 [docs/knowledge-rag.md](docs/knowledge-rag.md)。
 - `ClaimContextManager`可注入Redis客户端、摘要链和实体抽取器；Qwen需注入匹配模型的token_counter，默认cl100k_base只作教学计数，首次使用需准备tiktoken缓存。
 
+## 部署到 VPS：`/ai` 子路径（已验证）
+
+下面这套方式适合单机 VPS：FastAPI 在容器内监听 `127.0.0.1:8001`，Embedding / Reranker 在独立容器内监听 `8010`，nginx 把 `/ai/` 反代到应用根路径。静态资源使用相对路径，因此同一份前端既能在本地 `/` 工作，也能在线上 `/ai/` 工作。
+
+### 1. 目录与依赖
+
+```text
+/opt/claims-ai-agent/
+├── app/                     # 代码（或直接把仓库放在这里）
+├── data/                    # 知识库源文件，只读挂载
+├── .data/                   # Milvus Lite、SQLite、日志，持久化
+├── models/
+│   ├── bge-m3/              # 约 2.1GB
+│   └── bge-reranker-base/   # 约 1.1GB，model.safetensors
+├── .env                     # 不放仓库，权限 600
+├── Dockerfile
+├── Dockerfile.embed
+└── docker-compose.prod.yml
+```
+
+服务器需要 Docker 和 Compose v2。3.6GB 内存 + 2 核 CPU 的机器在同时加载 BGE-M3 和 Reranker 时建议增加 4GB swap；swap 只是防止 OOM，不会让 CPU 推理变快。
+
+```bash
+fallocate -l 4G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+### 2. 下载模型
+
+模型不进入 Git，也不进入应用镜像。服务器能访问 Hugging Face 时，用独立容器下载：
+
+```bash
+docker run --rm \
+  -v /opt/claims-ai-agent/models:/models \
+  -v /opt/claims-ai-agent/scripts:/scripts \
+  -e MODEL_DIR=/models \
+  python:3.12-slim \
+  sh -c 'pip install -q huggingface_hub && python /scripts/download_models.py'
+```
+
+下载脚本会跳过 `onnx/`、图片和重复权重，只保留 `pytorch_model.bin` / `model.safetensors` 与 tokenizer、config、Pooling 文件。
+
+### 3. 配置 `.env`
+
+从本地复制 `.env` 到服务器后执行 `chmod 600`。与本地开发不同的关键项：
+
+```ini
+APP_ENV=development
+CLAIMS_API_KEY=
+REVIEWER_API_KEY=
+EMBEDDING_BASE_URL=http://embed:8010/v1
+RERANK_BASE_URL=http://embed:8010/v1
+RERANK_ENABLED=true
+VECTOR_STORE_URI=/app/.data/milvus.db
+LOG_FILE=/app/.data/logs/app.log
+```
+
+前端当前不发送 `X-API-Key`，所以公网访问不要直接使用 `APP_ENV=production`，否则页面会收到 401。公网保护由 nginx Basic Auth 承担；如果以后改成生产模式，需要同时给前端加 API Key 注入或改用服务端会话。
+
+### 4. 构建与启动
+
+```bash
+cd /opt/claims-ai-agent
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml ps
+```
+
+首次启动后构建两个索引：
+
+```bash
+docker compose -f docker-compose.prod.yml exec app python scripts/build_investment_rag.py
+docker compose -f docker-compose.prod.yml exec app python scripts/build_knowledge_rag.py --domain general
+docker compose -f docker-compose.prod.yml restart app
+```
+
+`docker-compose.prod.yml` 使用 bind mount 持久化 `.data/`，因此 Milvus Lite 和 SQLite 不会随容器删除而丢失。不要把同一个 `.data/milvus.db` 同时交给多个应用进程写。
+
+### 5. nginx 反代与 Basic Auth
+
+`/ai` 无尾斜杠时先 301 到 `/ai/`；`/ai/` 去掉前缀后转给应用的 `/`。SSE 必须关闭 buffering。
+
+```nginx
+location = /ai {
+    return 301 /ai/;
+}
+
+location /ai/ {
+    auth_basic "Claims AI";
+    auth_basic_user_file /etc/nginx/.htpasswd-ai;
+    client_max_body_size 80m;
+    proxy_pass http://127.0.0.1:8001/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # 不把 Basic Auth 凭据透传给应用
+    proxy_set_header Authorization "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+    chunked_transfer_encoding on;
+}
+```
+
+生成密码文件：
+
+```bash
+# 用户名 ai；密码自行替换
+printf 'ai:%s\n' "$(openssl passwd -apr1 '替换成强密码')" > /etc/nginx/.htpasswd-ai
+chown root:nginx /etc/nginx/.htpasswd-ai
+chmod 640 /etc/nginx/.htpasswd-ai
+nginx -t && systemctl reload nginx
+```
+
+如果 HTTP 也配置了 `/ai/`，建议直接 301 到 HTTPS，避免 Basic Auth 凭据走明文：
+
+```nginx
+location = /ai { return 301 https://$host/ai/; }
+location /ai/ { return 301 https://$host$request_uri; }
+```
+
+### 6. 开机自启
+
+容器已设置 `restart: unless-stopped`。如需在 Docker 启动后统一拉起 compose，可加一个 oneshot 服务：
+
+```ini
+[Unit]
+Description=Claims AI Agent (Docker Compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/claims-ai-agent
+ExecStart=/usr/bin/docker compose -f /opt/claims-ai-agent/docker-compose.prod.yml up -d --no-build
+ExecStop=/usr/bin/docker compose -f /opt/claims-ai-agent/docker-compose.prod.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 7. 验证
+
+```bash
+curl -sS http://127.0.0.1:8001/health
+curl -sS http://127.0.0.1:8001/ready
+curl -sS -u 'ai:密码' https://你的域名/ai/health
+curl -sS -u 'ai:密码' -X POST https://你的域名/ai/api/rag/search \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"general","question":"多路召回和 rerank 是什么？","top_k":2}'
+```
+
+检索结果里应看到 `vector_ready=true`、`reranked=true`、`rerank_fallback=false`；如果 `rerank_fallback=true`，先检查 `8010/v1/rerank` 和 `models/bge-reranker-base` 是否完整。`/ai` 只验证页面和 API 通不通时，不要用 `HEAD`，FastAPI 根路由只接受 `GET`。
+
+### 8. 日常代码更新
+
+服务器上没有 Git，代码由本地 `rsync` 推上去；`.env`、`.data/`、`models/` 权重都保留在服务器，不会被覆盖。
+
+默认流程：
+
+```bash
+# 在本地仓库根目录
+./scripts/deploy_vps.sh
+```
+
+脚本会依次执行：
+
+1. 本地 `pytest -q`（不想跑可加 `SKIP_TESTS=1`）；
+2. `rsync` 代码，排除 `.env`、`.data`、虚拟环境、`models/bge-*` 权重；
+3. 服务器 `docker compose build app embed`；
+4. 重建 `app` 容器，等待 `/health`、`/ready`；
+5. 输出完成地址。
+
+只改前端 `static/` 时，可以走更快的路径（`static/` 已 bind mount 到容器）：
+
+```bash
+./scripts/deploy_vps.sh --static-only
+```
+
+#### 手动等价命令
+
+```bash
+# 1) 同步代码；注意保留服务器上的 .env/.data/models 权重
+rsync -az \
+  --exclude '.git' --exclude '.env' --exclude '.data' \
+  --exclude '.venv*' --exclude '__pycache__' \
+  --exclude 'models/bge-m3' --exclude 'models/bge-reranker-base' \
+  ./ vps:/opt/claims-ai-agent/
+
+# 2) 重建并重启
+ssh vps 'cd /opt/claims-ai-agent && \
+  docker compose -f docker-compose.prod.yml build app embed && \
+  docker compose -f docker-compose.prod.yml up -d --no-build embed && \
+  docker compose -f docker-compose.prod.yml up -d --no-build --force-recreate app'
+
+# 3) 验证
+ssh vps 'curl -fsS http://127.0.0.1:8001/health && echo && \
+  curl -fsS http://127.0.0.1:8001/ready'
+```
+
+#### 不同改动对应什么操作
+
+| 改动 | 操作 |
+| --- | --- |
+| `app.py`、`agents/`、`tools/`、`models/*.py`、`prompts/` | 重建 `app` 镜像并重启 `app` |
+| `static/` | 只同步 `static/`，无需重启（bind mount） |
+| `requirements.txt`、`Dockerfile` | 重建 `app` 镜像；依赖层会重新安装 |
+| `scripts/embed_server.py`、`Dockerfile.embed` | 重建 `embed` 镜像并重启 `embed`，再重启 `app` |
+| `.env` | 不改镜像，`docker compose up -d --force-recreate app` 让新环境变量生效 |
+| `data/investment_wiki/`、`data/knowledge_base/` | bind mount 已生效；需要重建索引并重启 `app` |
+| `docker-compose.prod.yml` | `docker compose up -d --force-recreate app`；镜像构建配置变了才需要 build |
+| nginx 配置 | 在服务器 `nginx -t && systemctl reload nginx`，与容器无关 |
+
+知识库更新：
+
+```bash
+ssh vps 'cd /opt/claims-ai-agent && \
+  docker compose -f docker-compose.prod.yml exec app python scripts/build_investment_rag.py && \
+  docker compose -f docker-compose.prod.yml exec app python scripts/build_knowledge_rag.py --domain general && \
+  docker compose -f docker-compose.prod.yml restart app'
+```
+
+如果修改了切块规则，先删除对应 collection 再重建，否则旧 chunk 会残留；详见 `AGENTS.md` 的“索引重建”。
+
+#### 回滚
+
+重建前先给当前镜像打备份 tag：
+
+```bash
+ssh vps 'docker tag claims-agent:prod claims-agent:backup-$(date +%Y%m%d%H%M)'
+```
+
+回滚时把备份 tag 重新指向 `claims-agent:prod`，再强制重建 `app`：
+
+```bash
+ssh vps 'docker tag claims-agent:backup-202610261200 claims-agent:prod && \
+  cd /opt/claims-ai-agent && \
+  docker compose -f docker-compose.prod.yml up -d --no-build --force-recreate app'
+```
+
 ## 追踪、基础设施及部署
 
 ```bash

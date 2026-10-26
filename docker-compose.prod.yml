@@ -1,0 +1,56 @@
+services:
+  app:
+    image: claims-agent:prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8001:8001"
+    env_file:
+      - .env
+    environment:
+      # 前端不发送 X-API-Key；公网访问由 nginx Basic Auth 保护。
+      APP_ENV: development
+      CLAIMS_API_KEY: ""
+      REVIEWER_API_KEY: ""
+      EMBEDDING_BASE_URL: http://embed:8010/v1
+      RERANK_BASE_URL: http://embed:8010/v1
+      VECTOR_STORE_URI: /app/.data/milvus.db
+      LOG_FILE: /app/.data/logs/app.log
+      RERANK_ENABLED: "true"
+    volumes:
+      - ./data:/app/data:ro
+      # 前端改完 rsync 即可生效，不必重建镜像
+      - ./static:/app/static:ro
+      - ./.data:/app/.data
+    depends_on:
+      embed:
+        condition: service_healthy
+    restart: unless-stopped
+
+  embed:
+    image: claims-embed:prod
+    build:
+      context: .
+      dockerfile: Dockerfile.embed
+    volumes:
+      - ./models:/app/models:ro
+    environment:
+      BGE_M3_MODEL_PATH: /app/models/bge-m3
+      BGE_RERANKER_MODEL_PATH: /app/models/bge-reranker-base
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    restart: unless-stopped
