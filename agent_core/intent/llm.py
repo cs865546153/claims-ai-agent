@@ -35,6 +35,8 @@ def _clamp(value: Any, default: float = 0.5) -> float:
 class LLMIntentClassifier:
     """用通用聊天模型做跨域路由；输出必须收敛到 RouteDecision。"""
 
+    engine_name = "llm"
+
     def __init__(
         self,
         *,

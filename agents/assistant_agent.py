@@ -7,6 +7,7 @@ token 级流式输出。后续方案 B 将在此基础上引入 checkpointer + i
 """
 import asyncio
 import json
+import logging
 import operator
 import time
 from typing import Annotated, Any, TypedDict
@@ -21,6 +22,9 @@ from monitoring import ERRORS
 from prompts.investment_prompt import INVESTMENT_ADVISOR_PROMPT, INVESTMENT_RAG_USAGE_PROMPT
 from tools.investment_rag import format_investment_context
 from tools.material_check import check_claim_materials
+
+LOGGER = logging.getLogger(__name__)
+
 
 INTENT_PROMPT = (
     '你是理赔与投资对话意图分类器。只能返回JSON对象，包含intent和confidence。'
@@ -51,6 +55,10 @@ INTENT_PROMPT = (
 )
 
 INVESTMENT_INTENTS = frozenset({'投资咨询', '组合诊断', '风险评估', '产品查询', '交易指令'})
+
+# 领域注册表里的一般咨询意图；用于推断 active_domain，帮助 JEV 处理省略主语的追问。
+GENERAL_INTENTS = frozenset({'一般咨询'})
+
 
 GENERAL_PROMPT = (
     '你是通用智能助手。直接回答用户的非理赔问题，语言清晰、准确。'
@@ -127,11 +135,56 @@ def _conversation(question: str, history: list[Any], system_prompt: str) -> list
     return messages
 
 
+def active_domain_from_history(history: list[Any]) -> str | None:
+    """从上一轮意图推断当前领域；JEV 仅在消息有歧义时使用该提示。"""
+    last_intent = next(
+        (getattr(turn, 'intent', None) for turn in reversed(history) if getattr(turn, 'intent', None)),
+        None,
+    )
+    if last_intent is None or last_intent in GENERAL_INTENTS:
+        return None
+    return 'investment' if last_intent in INVESTMENT_INTENTS else 'claims'
+
+
 def build_assistant_graph(*, classifier: Any, general_model: Any,
                           assistant_model: Any, service: Any,
                           investment_model: Any = None,
-                          investment_rag: Any = None) -> Any:
-    """构建无状态对话助手图；依赖经闭包注入，节点为 async 编排函数。"""
+                          investment_rag: Any = None,
+                          intent_router: Any = None) -> Any:
+    """构建无状态对话助手图；依赖经闭包注入，节点为 async 编排函数。
+
+    ``intent_router`` 是 ``agent_core.intent.adapter.AssistantIntentRouter``：
+    接入后优先走 JEV/LLM/Hybrid 路由，失败或契约不符时回落到内置分类模型。
+    """
+
+    async def _route_intent(state: AssistantState,
+                            classification_messages: list[Any]) -> tuple[Any, Any, str | None]:
+        """优先使用上层注入的意图路由，失败时回落内置分类模型（返回路由错误摘要）。"""
+        route_error: str | None = None
+        if intent_router is not None:
+            try:
+                route = await intent_router.classify(
+                    question=state['question'],
+                    history=state['history'],
+                    attachments=state['documents'],
+                    active_domain=active_domain_from_history(state['history']),
+                )
+                return (
+                    IntentResult(intent=route.intent, confidence=route.confidence,
+                                 policy_id=route.policy_id),
+                    route.decision,
+                    None,
+                )
+            except Exception as exc:  # noqa: BLE001 - 路由故障不能阻断对话
+                # 只记录异常类型；详细原因（可能含模型回显）放 trace，由 SSE 层统一脱敏。
+                route_error = f'{type(exc).__name__}: {exc}'[:200]
+                LOGGER.warning('意图路由失败，回落内置分类模型：%s', type(exc).__name__)
+
+        intent_response = await classifier.ainvoke(classification_messages)
+        raw_intent = chat_content(intent_response).strip()
+        if raw_intent.startswith('```'):
+            raw_intent = raw_intent.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
+        return IntentResult.model_validate_json(raw_intent), None, route_error
 
     async def classify(state: AssistantState) -> dict[str, Any]:
         events: list[dict[str, Any]] = []
@@ -149,19 +202,54 @@ def build_assistant_graph(*, classifier: Any, general_model: Any,
                 f'当前处于第{state["material_round"]}轮材料补充状态；大于0时，关于材料、上传、缺失或无法补充的续答应继承补充材料意图。'
             )),
         ]
-        events.append({'trace': {'node': 'classification', 'status': 'running',
-                                 'model': getattr(classifier, 'model_name', '意图模型'),
-                                 'history_count': len(recent_history),
-                                 'input': _model_inputs(classifier, classification_messages)}})
-        intent_response = await classifier.ainvoke(classification_messages)
-        raw_intent = chat_content(intent_response).strip()
-        if raw_intent.startswith('```'):
-            raw_intent = raw_intent.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
-        intent = IntentResult.model_validate_json(raw_intent)
-        events.append({'trace': {'node': 'classification', 'status': 'done',
-                                 'elapsed_ms': round((time.monotonic() - state['started']) * 1000),
-                                 'intent': intent.intent, 'output': intent.model_dump()}})
-        events.append({'intent': intent.intent, 'intent_confidence': intent.confidence})
+        running_trace: dict[str, Any] = {
+            'node': 'classification', 'status': 'running',
+            'model': (getattr(intent_router, 'model_label', None)
+                      or getattr(classifier, 'model_name', '意图模型')),
+            'engine': (getattr(intent_router, 'engine_label', None) or 'llm-prompt'),
+            'history_count': len(recent_history),
+            'input': _model_inputs(classifier, classification_messages),
+        }
+        if intent_router is not None:
+            running_trace['router_input'] = {
+                'question': mask_pii(state['question']),
+                'history_count': len(state['history']),
+                'document_count': len(state['documents']),
+                'active_domain': active_domain_from_history(state['history']),
+            }
+        events.append({'trace': running_trace})
+        intent, route_decision, route_error = await _route_intent(state, classification_messages)
+        done_trace: dict[str, Any] = {
+            'node': 'classification', 'status': 'done',
+            'elapsed_ms': round((time.monotonic() - state['started']) * 1000),
+            'intent': intent.intent, 'output': intent.model_dump(),
+            'engine': (route_decision.engine if route_decision is not None else 'llm-prompt'),
+        }
+        if route_decision is not None:
+            router_model = getattr(intent_router, 'model_label', None)
+            done_trace['model'] = (
+                router_model if route_decision.engine == 'jev'
+                else getattr(classifier, 'model_name', None) or router_model or '意图模型'
+            )
+            done_trace['route'] = {
+                'domain': route_decision.domain,
+                'intent': route_decision.intent,
+                'confidence': route_decision.confidence,
+                'margin': route_decision.margin,
+                'needs_clarification': route_decision.needs_clarification,
+                'fallback_used': route_decision.fallback_used,
+                'fallback_reason': route_decision.fallback_reason,
+                'warnings': route_decision.warnings,
+                'shadow': route_decision.shadow,
+            }
+        if route_error is not None:
+            done_trace['route_error'] = route_error
+        events.append({'trace': done_trace})
+        intent_event: dict[str, Any] = {'intent': intent.intent, 'intent_confidence': intent.confidence}
+        if route_decision is not None:
+            intent_event['intent_engine'] = route_decision.engine
+            intent_event['intent_needs_clarification'] = route_decision.needs_clarification
+        events.append(intent_event)
 
         material_continuation = state['material_round'] > 0 and any(
             token in state['question'] for token in MATERIAL_TOKENS

@@ -62,6 +62,46 @@ from tools.document_analysis import (
 logger = logging.getLogger(__name__)
 
 
+def build_assistant_intent_router(cfg: Settings, intent_model: Any = None) -> Any:
+    """按配置构建主链路意图路由；失败时返回 None，由内置 LLM 分类兜底。
+
+    - 路由层只决定 domain/intent/confidence，业务分流仍由对话图负责。
+    - 缺少 JEV_API_KEY 时 factory 会跳过 JEV 影子；INTENT_ENGINE=jev 则会因缺 key
+      初始化失败，这里降级为内置分类而不是让服务启动失败。
+    """
+    if not cfg.intent_router_enabled:
+        logger.info('INTENT_ROUTER_ENABLED=false，回退内置 LLM 意图分类')
+        return None
+
+    from agent_core.intent.adapter import AssistantIntentRouter
+    from agent_core.intent.contracts import RouteDecision
+    from agent_core.intent.factory import IntentConfig, build_intent_classifier
+
+    def log_decision(decision: RouteDecision) -> None:
+        # 只记录意图元数据，不记录用户原文；影子字段用于 JEV/LLM 对拍。
+        logger.info(
+            'intent.route engine=%s domain=%s intent=%s confidence=%.3f margin=%s '
+            'fallback=%s reason=%s clarification=%s shadow=%s warnings=%s',
+            decision.engine, decision.domain, decision.intent, decision.confidence,
+            decision.margin, decision.fallback_used, decision.fallback_reason,
+            decision.needs_clarification, decision.shadow, decision.warnings,
+        )
+
+    try:
+        config = IntentConfig.from_settings(cfg)
+        classifier = build_intent_classifier(
+            config,
+            llm_model=intent_model or get_model('classification'),
+            on_decision=log_decision,
+        )
+        router = AssistantIntentRouter(classifier)
+        logger.info('意图路由已启用：%s（INTENT_ENGINE=%s）', router.engine_label, cfg.intent_engine)
+        return router
+    except Exception as exc:  # noqa: BLE001 - 路由初始化失败不能阻断服务启动
+        logger.warning('意图路由初始化失败，回退内置 LLM 分类：%s: %s', type(exc).__name__, exc)
+        return None
+
+
 class HealthResponse(BaseModel):
     status: Literal['ok'] = 'ok'
 
@@ -122,6 +162,7 @@ def create_app(
             logger.exception('通用知识库初始化失败，已关闭 /api/rag')
     limiter = RateLimitMiddleware()
     locks: dict[str, asyncio.Lock] = {}
+    effective_intent_router = build_assistant_intent_router(cfg, intent_model)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -146,6 +187,7 @@ def create_app(
                       or (':memory:' if path == ':memory:' else '.data/audit.sqlite'))
         audit = AuditStore(audit_path)
         application.state.audit = audit
+        application.state.intent_router = effective_intent_router
         try:
             async with AsyncSqliteSaver.from_conn_string(path) as saver:
                 await saver.setup()
@@ -153,6 +195,11 @@ def create_app(
                 application.state.investment_graph = build_investment_graph(investment_service, saver)
                 yield
         finally:
+            if effective_intent_router is not None:
+                try:
+                    await effective_intent_router.aclose()
+                except Exception:  # noqa: BLE001 - 关闭失败不影响进程退出
+                    logger.warning('意图路由关闭失败', exc_info=True)
             audit.close()
 
     application = FastAPI(title='智能业务助手服务', version='0.3.0', lifespan=lifespan)
@@ -636,6 +683,7 @@ def create_app(
                     investment_model=effective_investment,
                     service=service,
                     investment_rag=effective_investment_rag,
+                    intent_router=getattr(application.state, 'intent_router', None),
                 )
                 state = await graph.ainvoke({
                     'question': body.question,

@@ -157,7 +157,8 @@ async function streamAnswer(question, newDocuments, article) {
       if (data.intent) {
         detectedIntent = data.intent;
         intent.hidden = false;
-        intent.textContent = `${data.intent} · ${Math.round(data.intent_confidence * 100)}%`;
+        const engineTag = data.intent_engine ? ` · ${String(data.intent_engine).toUpperCase()}` : "";
+        intent.textContent = `${data.intent} · ${Math.round(data.intent_confidence * 100)}%${engineTag}`;
       }
       if (data.content) answer.textContent += data.content;
     }
@@ -380,8 +381,8 @@ function resetTrace() {
     + arrow + investmentDetail
     + arrow + capabilityDetail
     + arrow + node("output");
-  traceNode("intent_router", "notconnected", "新 IntentRouter 未接入，当前复用旧分类器");
-  traceNode("domain_registry", "notconnected", "新 DomainRegistry 未接入，当前由旧 route 选择");
+  traceNode("intent_router", "waiting", "等待意图路由");
+  traceNode("domain_registry", "waiting", "等待领域校验");
   traceNode("domain_plugin", "notconnected", "插件封装待接入，当前按链路选择");
   traceNode("investment", "compat", "已接入 · 咨询走对话，交易走确认 + 人工审批");
   investmentTraceNodes.forEach(id => traceNode(id, "skipped", "本轮未进入投资链路"));
@@ -400,14 +401,51 @@ function updateTrace(event) {
   traceNode(event.node, event.status, detail);
   setTraceParams(event.node, event.input, event.output);
 
-  if (event.node === "classification" && !traceDetails.intent_router) {
-    if (event.status === "running") traceNode("intent_router", "running", "复用旧分类器识别意图");
+  if (event.node === "classification") {
+    const engine = event.engine || "llm-prompt";
+    const engineLabel = engine === "jev" ? "JEV 意图模型"
+      : engine === "llm" ? "LLM 意图路由"
+      : engine.startsWith("router(") ? `路由层 ${engine}`
+      : "内置分类模型";
+    const route = event.route || {};
+    const fallback = route.fallback_used ? ` · 兜底 ${route.fallback_reason || "已触发"}` : "";
+    const shadow = route.shadow
+      ? ` · 影子 ${route.shadow.engine}${route.shadow.agreement ? " 一致" : " 不一致"}`
+      : "";
+
+    if (event.router_input) {
+      setTraceParams("classification", event.router_input, event.status === "done" ? event.output : undefined);
+    }
+
+    if (event.status === "running") {
+      traceNode("intent_router", "running", `${engineLabel} 识别中`);
+      setTraceParams("intent_router", event.router_input || { engine }, undefined);
+    }
     if (event.status === "done") {
-      traceNode("intent_router", "compat", `兼容旧分类器 · ${event.intent || "意图已识别"}`);
-      if (event.output) {
-        setTraceParams("intent_router", {source: "assistant_agent.classify"}, {
-          intent: event.intent, confidence: event.output.confidence,
-        });
+      traceNode("intent_router", event.engine === "llm-prompt" ? "compat" : "done",
+        `${engineLabel} · ${event.intent || "意图已识别"}${fallback}${shadow}`);
+      setTraceParams("intent_router", event.router_input || { engine }, {
+        engine: event.engine,
+        domain: route.domain,
+        intent: event.intent,
+        confidence: event.output?.confidence ?? route.confidence,
+        margin: route.margin,
+        needs_clarification: route.needs_clarification,
+        fallback_used: route.fallback_used,
+        fallback_reason: route.fallback_reason,
+        warnings: route.warnings,
+        shadow: route.shadow,
+        route_error: event.route_error,
+      });
+      if (event.route_error) {
+        traceNode("domain_registry", "compat", "路由异常，已回退内置分类");
+        setTraceParams("domain_registry", { source: "assistant_agent.classify" }, { route_error: event.route_error });
+      } else if (route.domain && event.engine !== "llm-prompt") {
+        traceNode("domain_registry", "done", `已校验 ${route.domain} / ${event.intent}`);
+        setTraceParams("domain_registry", { source: "configs/domains.yaml" },
+          { domain: route.domain, intent: event.intent, engine: event.engine });
+      } else {
+        traceNode("domain_registry", "compat", "内置分类模型未走领域注册");
       }
     }
   }
@@ -422,7 +460,7 @@ function updateTrace(event) {
       ? "一般咨询 → 通用基模"
       : selected === "investment" ? "投资意图 → 投资智能体" : "理赔意图 → 理赔智能体";
     traceNode("route", "done", routeText);
-    if (!traceDetails.domain_registry) {
+    if (!traceDetails.classification?.route) {
       traceNode("domain_registry", "compat", `当前由旧 route 选择 ${selected}`);
       setTraceParams("domain_registry", {source: "assistant_agent.route"}, {domain: selected});
     }

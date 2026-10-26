@@ -38,6 +38,16 @@ class HybridIntentClassifier:
         self.margin_threshold = margin_threshold
         self.on_decision = on_decision
 
+    @property
+    def engine_label(self) -> str:
+        """组合描述，写入 trace 便于区分 shadow / hybrid / 单引擎。"""
+        def name(component: IntentClassifier | None) -> str:
+            if component is None:
+                return "none"
+            return str(getattr(component, "engine_name", type(component).__name__))
+
+        return f"primary={name(self.primary)},fallback={name(self.fallback)},shadow={name(self.shadow)}"
+
     async def classify(self, request: IntentRequest) -> RouteDecision:
         started = time.monotonic()
         shadow_result: RouteDecision | BaseException | None = None

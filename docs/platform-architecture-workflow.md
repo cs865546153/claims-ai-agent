@@ -1,8 +1,14 @@
 #  AI Agent 平台：架构与工作流
 
-> 版本：v0.1  
+> 版本：v0.2  
 > 适用范围：当前仓库的理赔对话、理赔案件，以及规划中的投资 / 通用领域。  
-> 标记说明：`[现有]` 表示当前代码已有；`[新增]` 表示本次已落地；`[规划]` 表示设计已定，尚未接入。
+> 标记说明：`[现有]` 表示当前代码已有；`[新增]` 表示已落地；`[已接入]` 表示已接进主链路；
+> `[规划]` 表示设计已定，尚未接入。
+>
+> 2026-10-27：`IntentRouter` 已接入 `/api/assistant/stream`；代码默认 `shadow`，当前 `.env`
+> 为 `hybrid`（JEV 主 + LLM 兜底）；JEV 单引擎评测联合准确率 89.7%（39 条）。
+> 代码路径为 `agent_core/intent/`，本文历史段落中的 `platform/intent/` 为旧名。
+
 
 ---
 
@@ -54,7 +60,7 @@
                                 │ message / history / active_domain / attachments
                                 ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│ 3. 意图路由 [新增]                                                 │
+│ 3. 意图路由 [已接入]                                               │
 │    IntentRouter / HybridIntentClassifier                           │
 │    ├─ shadow（默认）：LLM 主路由 + JEV 影子                        │
 │    ├─ hybrid：JEV 主路由 + LLM 兜底                                │
@@ -121,10 +127,11 @@
                            │ IntentRequest
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ 4. 意图路由 IntentRouter                                      │
+│ 4. 意图路由 IntentRouter（已接入 /api/assistant/stream）       │
 │    shadow: LLM 主 + JEV 影子                                  │
 │    hybrid: JEV 主 + LLM 兜底                                  │
 │    输出: domain / intent / confidence / margin               │
+│    失败回落: assistant_agent 内置分类模型                      │
 └──────────────────────────┬───────────────────────────────────┘
                            │ RouteDecision
                            ▼
@@ -356,7 +363,7 @@ IntentRouter → investment
 
 ## 6. 意图路由内部流程
 
-### 6.1 shadow 模式（当前默认）
+### 6.1 shadow 模式（当前默认，已接入主链路）
 
 ```text
 Request ──▶ LLM 主路由 ──▶ RouteDecision ──▶ 返回
@@ -367,6 +374,12 @@ Request ──▶ LLM 主路由 ──▶ RouteDecision ──▶ 返回
 
 适用场景：中文为主、JEV 中文效果尚未达标。  
 作用：线上稳定，同时积累 JEV 的真实对比数据。
+
+接入说明：
+
+- 影子结果写入 SSE `classification` trace 的 `route.shadow`，同时进入 `intent.route` 日志；
+- 没配 `JEV_API_KEY` 时影子自动跳过，主路由仍为 LLM；
+- 影子与主路由 `asyncio.gather` 并行，请求延迟取两者较慢的一个。
 
 ### 6.2 hybrid 模式（中文评测达标后）
 
@@ -392,7 +405,8 @@ margin     >= 0.2
 
 - `confidence` 低于阈值 → `needs_clarification = true`
 - 第一候选与第二候选的差值 `margin` 太小 → 也视为不确定
-- 上层可以选择“追问澄清”，而不是硬猜
+- `hybrid` 模式下低置信会触发 LLM 兜底；兜底后仍不确定则保留 `needs_clarification`
+- 当前对话图只把该标记写入 trace / intent 事件，不强制打断；需要澄清时由业务节点追问
 
 可通过以下环境变量调整：
 
@@ -407,17 +421,18 @@ INTENT_MARGIN_THRESHOLD=0.2
 
 | 模块 | 状态 |
 |---|---|
-| `platform/intent/contracts.py` | `[新增]` 已落地：`IntentRequest`、`RouteDecision`、`DomainManifest`、`IntentClassifier` |
-| `platform/intent/registry.py` | `[新增]` 已落地：从 `configs/domains.yaml` 加载领域 |
-| `platform/intent/jev.py` | `[新增]` 已落地：JEV 适配器、脱敏、可选翻译、置信度 / 边界纠正 |
-| `platform/intent/llm.py` | `[新增]` 已落地：LLM 主路由、可选翻译器 |
-| `platform/intent/hybrid.py` | `[新增]` 已落地：主路由 + 兜底 + 影子 |
-| `platform/intent/factory.py` | `[新增]` 已落地：`shadow / hybrid / jev / llm` 四种预设 |
+| `agent_core/intent/contracts.py` | `[新增]` 已落地：`IntentRequest`、`RouteDecision`、`DomainManifest`、`IntentClassifier` |
+| `agent_core/intent/registry.py` | `[新增]` 已落地：从 `configs/domains.yaml` 加载领域 |
+| `agent_core/intent/jev.py` | `[新增]` 已落地：JEV 适配器、脱敏、可选翻译、置信度 / 边界纠正 |
+| `agent_core/intent/llm.py` | `[新增]` 已落地：LLM 主路由、可选翻译器 |
+| `agent_core/intent/hybrid.py` | `[新增]` 已落地：主路由 + 兜底 + 影子 |
+| `agent_core/intent/factory.py` | `[新增]` 已落地：`shadow / hybrid / jev / llm` 四种预设 |
+| `agent_core/intent/adapter.py` | `[已接入]` 已落地：`AssistantIntentRouter` 把路由决策转成工作台 `IntentResult` |
 | `configs/domains.yaml` | `[新增]` 已落地：claims / investment / general 三领域清单 |
 | `scripts/eval_intent.py` | `[新增]` 已落地：准确率、混淆矩阵、兜底率、影子一致性、延迟 |
 | `data/intent_golden.jsonl` | `[新增]` 已落地：中英混合合成评测集 |
-| `app.py` 接入 IntentRouter | `[规划]` 未接入，现有理赔链路保持原样 |
-| `ClaimsPlugin` 包装 | `[规划]` 待做 |
+| `app.py` 接入 IntentRouter | `[已接入]` `build_assistant_intent_router()` + `/api/assistant/stream`；可用 `INTENT_ROUTER_ENABLED=false` 关闭 |
+| `ClaimsPlugin` 包装 | `[规划]` 待做：当前仍由 `assistant_agent` 直接分流 |
 | `Investment / General` 图实现 | `[规划]` 待做 |
 | Redis / Celery / Kafka 等外部适配器 | `[规划]` 待做 |
 | Outbox 闭环 | `[规划]` 当前未闭环 |
@@ -427,8 +442,8 @@ INTENT_MARGIN_THRESHOLD=0.2
 | 环节 | 当前 | 目标 |
 |---|---|---|
 | 入口 | `/assistant/stream` + `/claims/*` | 统一入口 + 领域路由 |
-| 意图识别 | `assistant_agent` 内部 `classify` | `IntentRouter`（LLM/JEV/Hybrid） |
-| 领域 | 只有理赔 | claims / investment / general |
+| 意图识别 | `IntentRouter` 已接入，失败回落内置分类 | 领域插件各自持有图 |
+| 领域 | 理赔 + 投资 + 通用（图内分流） | claims / investment / general 插件化 |
 | 状态 | 进程内 checkpointer | `StateStore` SPI（Redis/Postgres） |
 | 队列 | 同步长请求 | `TaskQueue`（Celery/Arq） |
 | 事件 | Outbox 未闭环 | `EventBus` / Outbox |
@@ -488,13 +503,13 @@ ObjectStore:  Local    → S3 / OSS
 
 | 路径 | 作用 |
 |---|---|
-| `app.py` | FastAPI 入口、SSE、理赔接口 |
+| `app.py` | FastAPI 入口、SSE、理赔接口；启动时 `build_assistant_intent_router()` |
 | `agents/assistant_agent.py` | 理赔对话图：`classify` / `material_gate` / `formal_review` |
 | `agents/claim_agent.py` | 理赔案件状态机、三专家、`route_decision` |
 | `agents/middleware_audit.py` | PII 脱敏、限流、缓存、审计、HITL |
 | `config.py` | 模型工厂与现有两套路由 |
-| `settings.py` | 环境配置，含新增的 `INTENT_*` / `JEV_*` |
-| `platform/intent/` | 新增的意图路由公共层 |
+| `settings.py` | 环境配置，含 `INTENT_ROUTER_ENABLED` / `INTENT_*` / `JEV_*` |
+| `agent_core/intent/` | 意图路由公共层，`adapter.py` 是主链路接入点 |
 | `configs/domains.yaml` | 领域清单，单一事实源 |
 | `scripts/eval_intent.py` | 意图评测脚本 |
 | `data/intent_golden.jsonl` | 意图评测数据 |
@@ -541,11 +556,15 @@ python -m scripts.eval_intent --engine jev --translate
 
 ## 11. 注意事项
 
-1. **当前 `app.py` 还没有接入新的 `IntentRouter`**  
-   现有理赔链路保持原样，避免破坏已有测试和线上行为。
+1. **`IntentRouter` 已接入，当前 `.env` 走 hybrid（JEV 主 + LLM 兜底）**  
+   `app.py` 启动时构建一次路由层，`assistant_agent.classify` 优先调用；路由异常回落
+   内置分类模型，SSE 不中断。`INTENT_ROUTER_ENABLED=false` 可整体关闭。
+   2026-10-27 评测：JEV 单引擎联合准确率 89.7%，低置信会转 LLM；残余混淆主要是
+   「组合诊断 ↔ 投资咨询」，扩充语料前不要切 `jev` 单引擎。
 
-2. **JEV 当前中文效果不稳定**  
-   中文同义句可能被分到 general，因此默认使用 `shadow`，不要直接全量接管。
+2. **JEV 中文能力可用但仍有残余混淆**  
+   实测联合准确率 89.7%（39 条合成样本），主要错在「组合诊断 ↔ 投资咨询」；
+   因此用 `hybrid` 让 LLM 兜底，扩充真实脱敏语料并复测前不要切 `jev` 单引擎。
 
 3. **API Key 只从环境变量读取**  
    `JEV_API_KEY` 不写入仓库、不写入报告、不打印日志。已经暴露过的 key 应尽快轮换。

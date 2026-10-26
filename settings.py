@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ''
     langfuse_secret_key: SecretStr = SecretStr('')
     # 意图路由：默认 shadow（LLM 主路由 + JEV 影子），中文评测达标后再切 hybrid。
+    intent_router_enabled: bool = True
     intent_engine: Literal['jev', 'llm', 'hybrid', 'shadow'] = 'shadow'
     intent_primary: str | None = None
     intent_fallback: str | None = None

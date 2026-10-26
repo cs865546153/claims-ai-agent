@@ -56,6 +56,8 @@ def _top_margin(probabilities: dict[str, float]) -> float | None:
 class JevIntentClassifier:
     """JEV 意图引擎；一次调用同时返回领域与意图。"""
 
+    engine_name = "jev"
+
     def __init__(
         self,
         *,

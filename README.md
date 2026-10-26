@@ -1,17 +1,48 @@
-# 理赔 Agent 培训材料实现
+# 智能业务助手（Claims AI Agent）：理赔 + 投资 + 通用知识库 RAG
 
-依据 `claims-langchain-training.md` 实现分层代码、演示、测试和部署配置。主项目要求Python 3.12+（Windows 与 macOS 的 Python 3.15 环境均已验证通过，macOS 步骤见下文「macOS 快速启动」）、LangChain 0.3.14、langchain-openai 0.2.14；官方Deep Agents单独安装。默认连接本地推理，百炼需显式选择。真实模式未配置业务适配器会转人工，不返回假保单或虚构定损。
+面向理赔审核、投资知识问答和通用知识库问答的一体化智能助手。主应用使用 **FastAPI + LangGraph**，核心能力包括：
 
-完整逐项映射及验证边界见 [实现验收清单](docs/implementation-matrix.md)；原文API与业务规则修正见 [差异记录](docs/material-differences.md)。
+- **理赔状态机**：报案、补材料、保单查询、三专家并行分析、置信度/风险决策、人工复核与断点恢复；
+- **投资知识库 RAG**：`data/investment_wiki/`，BGE-M3 向量 + BM25 + 元数据三路召回，加权 RRF 后由 BGE-Reranker 精排；
+- **通用知识库 RAG**：`data/knowledge_base/`，支持 Markdown/TXT/PDF/DOCX/HTML，提供 `/api/rag/search` 与 `/api/rag/answer`；
+- **接入层**：RequestID、API Key/审核员认证、限流、PII 脱敏、审计哈希链、SSE 流式输出；
+- **意图路由**：`agent_core/intent/` 提供 JEV / LLM / Hybrid / Shadow 四种模式，已接入
+  `/api/assistant/stream`；代码默认 `shadow`（LLM 主路由 + JEV 影子），当前 `.env` 已配
+  `INTENT_ENGINE=hybrid`（JEV 主 + LLM 兜底）；
+- **部署**：Docker Compose + nginx `/ai/` 子路径，线上演示入口为 <https://aiwanxiang.top/ai/>（由 nginx Basic Auth 保护，凭据不写入仓库）。
 
-## ⚠️ 两个虚拟环境，先分清再动手
+项目最初基于理赔 Agent 培训材料，现已扩展为可本地运行、可容器化部署的多领域 RAG 应用。真实理赔仍需接入组织内的保单查询、单证核验、通知/支付等适配器；未配置时状态机会显式转人工，不返回假保单或虚构定损。
+
+**当前验证基线（2026-10-27）**：`182 passed, 1 skipped`，覆盖率约 83%；跳过项为需要真实 Milvus 的集成测试。完整逐项映射见 [实现验收清单](docs/implementation-matrix.md)，架构见 [Architecture.md](Architecture.md)，Agent 工作约定见 [AGENTS.md](AGENTS.md)。
+
+三条主链路：
+
+```text
+/api/assistant/stream  -> 意图路由（JEV/LLM/Hybrid）-> 理赔 / 投资 / 通用问答（SSE）
+/api/claims/*          -> 理赔状态机（补材料、审核、恢复）
+/api/rag/*             -> 通用知识库检索与引用校验
+/api/investment/rag/*  -> 投资知识库只读检索
+```
+
+## 线上演示
+
+- 地址：<https://aiwanxiang.top/ai/>；`/ai` 会 301 到 `/ai/`。
+- 入口由 nginx Basic Auth 保护，`/ai/` 反向代理到 `127.0.0.1:8001`；应用不直接监听公网。
+- 当前线上为单机部署：`app` 容器 + `embed` 容器（BGE-M3 / BGE-Reranker）+ Milvus Lite + SQLite。
+- 当前线上仍使用 `APP_ENV=development` + nginx Basic Auth，仅适合演示/内测；生产模式必须同时配置 API 认证、限流、备份、监控，并更换默认弱口令。
+- 部署、更新与回滚见下文「部署到 VPS：`/ai` 子路径」。
+
+## ⚠️ 三个虚拟环境，先分清再动手
 
 | 提示符 | 用途 | 里面有什么 |
 | --- | --- | --- |
 | `(.venv-py315)` | **主项目**：启动 Web 服务、跑测试、调用大模型 | FastAPI、uvicorn、LangChain 0.3 全家桶 |
-| `(.venv-deep)` | 官方 Deep Agents 隔离环境 | 只有 deepagents 及其依赖，**没有 uvicorn / FastAPI** |
+| `(.venv-embed)` | **本地 BGE-M3 / BGE-Reranker 服务**（Python 3.12） | sentence-transformers、torch、FastAPI、uvicorn；主项目通过 HTTP 调用 |
+| `(.venv-deep)` | 可选的官方 Deep Agents 隔离环境 | 只有 deepagents 及其依赖，**没有 uvicorn / FastAPI** |
 
-> 可选：本地 BGE-M3 embedding / BGE-Reranker 使用独立的 `.venv-embed`（Python 3.12），因为 `torch` 暂无 Python 3.15 wheel；主项目仍用 `.venv-py315`，两者互不影响。当前开发机已下载并启用 `models/bge-reranker-base`；未安装时 RAG 自动降级为词项重排。配置见下文「本地 BGE-M3 embedding + Reranker」。
+> 运行版本：本地主环境使用 Python 3.15；app 镜像为 Python 3.14；embed 镜像为 Python 3.12；CI 当前覆盖 3.12/3.14。修改依赖或 Dockerfile 时需同时验证这些组合。
+
+> `.venv-py314` 已废弃；需要 Deep Agents 时，用 Python 3.15 重建 `.venv-deep`（先确认 `deepagents` 支持 3.15）。`.venv-embed` 只在需要本地 embedding/rerank 时使用，未启动时 RAG 会自动降级为词项重排。
 
 启动服务前，先确认提示符是 `(.venv-py315)`；如果不是，先切换。
 
@@ -29,11 +60,9 @@ deactivate
 source .venv-py315/Scripts/activate
 ```
 
-> 若执行 `uvicorn ...` 报「无法将 uvicorn 识别为 cmdlet」或 `command not found`，十有八九是当前激活成了 `.venv-deep`。
+> 若执行 `uvicorn ...` 报「无法将 uvicorn 识别为 cmdlet」或 `command not found`，十有八九是当前激活成了 `.venv-deep` 或 `.venv-embed`。
 
 > 激活提示符只显示目录名，多个目录下都叫 `.venv-py315` 时看起来完全一样。用 `which python`（Windows：`Get-Command python`）确认解释器在**本项目根目录**下；例如 `My_Study/Python/.venv-py315` 是学习目录的环境，里面没有 FastAPI/uvicorn。
-
-> 旧的 `.venv-py314` / `.venv-deep` 依赖的基础解释器 Python 3.14 已从本机卸载，两个环境均已失效，请勿继续使用。需要 Deep Agents 时，用 Python 3.15 重建 `.venv-deep`（先确认 `deepagents` 支持 3.15）。
 
 ## macOS 快速启动（Apple Silicon / Intel）
 
@@ -109,9 +138,9 @@ python -m pip check
 - `requirements.txt` 中 PyYAML 在 `python_version >= "3.15"` 时使用 `vendor/` 的纯 Python wheel（该标记对所有平台生效，不仅 Windows），功能一致，只是关闭 libyaml C 加速。
 - 本项目 RAG 通过 `VECTOR_STORE_URI`（未设置时回退 `MILVUS_URI`）选择向量库：macOS/Linux 可指向本地 `./.data/milvus.db` 使用嵌入式 Milvus Lite（默认安装 `milvus-lite`），也可指向外部 Milvus；Windows 不安装 `milvus-lite`，需连接外部 Milvus。
 
-### 3. 配置 .env（默认 DeepSeek）
+### 3. 配置 .env（默认 local，可选 DeepSeek）
 
-`.env.example` 现在默认 `MODEL_PROVIDER=deepseek`。推荐用脚本写入密钥，**不回显、不进 shell 历史**：
+`.env.example` 默认 `MODEL_PROVIDER=local`，适合本机 Ollama / vLLM / LM Studio；如果使用 DeepSeek，推荐用脚本写入密钥，**不回显、不进 shell 历史**：
 
 ```bash
 bash scripts/set_deepseek_key.sh
@@ -119,7 +148,7 @@ bash scripts/set_deepseek_key.sh
 
 脚本会：创建 `.env`（若不存在）→ 提示输入 key → 设为 `MODEL_PROVIDER=deepseek` → `chmod 600` → 调 `GET /models` 校验鉴权，并检查 `DEEPSEEK_FLASH_MODEL` / `DEEPSEEK_PRO_MODEL` 是否在账号可用列表中。
 
-手工配置等价于：
+手工配置 DeepSeek 等价于：
 
 ```bash
 cp .env.example .env && chmod 600 .env
@@ -128,16 +157,30 @@ cp .env.example .env && chmod 600 .env
 #   DEEPSEEK_API_KEY=sk-...
 ```
 
-> 没填 key 时服务会**拒绝启动**，报 `DeepSeek模式需要配置DEEPSEEK_API_KEY`——这是配置校验，不是依赖问题。
+> 选择 `deepseek` 但没填 key 时服务会**拒绝启动**，报 `DeepSeek模式需要配置DEEPSEEK_API_KEY`——这是配置校验，不是依赖问题。选择 `local` 时，需要先启动 `LOCAL_LLM_BASE_URL` 指向的 OpenAI 兼容推理服务。
 
 其他可选 provider：
 
 | 目的 | 配置 |
 | --- | --- |
-| 默认：真实对话与单证识别 | `MODEL_PROVIDER=deepseek` + `DEEPSEEK_API_KEY` |
+| DeepSeek：真实对话与单证识别 | `MODEL_PROVIDER=deepseek` + `DEEPSEEK_API_KEY` |
 | 百炼 | `MODEL_PROVIDER=bailian` + `OPENAI_API_KEY` + `QWEN_*_MODEL` |
 | 本机推理（Ollama / vLLM / LM Studio，需自备模型） | `MODEL_PROVIDER=local`，改 `LOCAL_LLM_BASE_URL` 并使 `LOCAL_*_MODEL` 与服务注册名一致 |
 | 完全不接模型，只看演示 | 保持任意 provider，直接点页面「载入演示」；对话仍不可用 |
+
+意图路由（可选；代码默认不改变现有行为）：
+
+| 目的 | 配置 |
+| --- | --- |
+| 代码默认：LLM 主路由 + JEV 影子（只记录） | `INTENT_ROUTER_ENABLED=true`、`INTENT_ENGINE=shadow` |
+| JEV 主路由 + LLM 兜底（当前 `.env`） | `INTENT_ENGINE=hybrid` + `JEV_API_KEY=...` |
+| 只用 JEV / 只用 LLM | `INTENT_ENGINE=jev` / `INTENT_ENGINE=llm` |
+| 关闭路由层，回到内置 LLM 分类 | `INTENT_ROUTER_ENABLED=false` |
+
+> 当前仓库 `.env` 已配 `JEV_API_KEY` 并设 `INTENT_ENGINE=hybrid`（JEV 主 + LLM 兜底）。
+> 没配 `JEV_API_KEY` 时影子会自动跳过，服务照常启动；`INTENT_ENGINE=jev/hybrid`
+> 但缺 key 时主链路回落内置分类并记录 warning。JEV 是英文优先模型，中文场景可开
+> `INTENT_TRANSLATE_TO_ENGLISH=true`。2026-10-27 评测：39 条样本联合准确率 89.7%。
 
 改完自检：
 
@@ -210,7 +253,7 @@ curl -fsS http://127.0.0.1:8001/ready
 也可一条命令跑完整验证（会占用 8001 端口）：
 
 ```bash
-bash scripts/verify.sh                                  # 自动选 .venv-py315，其次 .venv-py314
+bash scripts/verify.sh                                  # 自动选择可用的主项目环境，通常为 .venv-py315
 VENV_DIR=.venv-py315 bash scripts/verify.sh              # 或显式指定
 ```
 
@@ -252,66 +295,68 @@ docker compose up -d --build
 
 Apple Silicon 上应用容器为 arm64。若 `--profile infra` 的 Milvus 拉不到 arm64 镜像，可对这些服务单独使用 `--platform linux/amd64`，或只启动 `app` 并指向外部 Milvus。
 
-> 本机验证（macOS 14.8.2 / Apple Silicon / Python 3.15.1）：`pip check` 无冲突，`pytest` 为 **169 passed, 1 skipped**（跳过项需真实 Milvus），`uvicorn app:app` 启动后 `/health`、`health_check.py` 均通过。国内网络安装依赖时请使用上面的清华镜像。
+> 本机验证（macOS 14.8.2 / Apple Silicon / Python 3.15.1）：`pip check` 无冲突，`pytest` 为 **182 passed, 1 skipped**（跳过项需真实 Milvus），`uvicorn app:app` 启动后 `/health`、`health_check.py` 均通过。国内网络安装依赖时请使用上面的清华镜像。
 
 ## 结构与职责
 
 ```text
-claims-agent-app/
-├── app.py                      # FastAPI、状态查询、补材料、授权审核恢复
-├── settings.py                 # Pydantic环境配置与密钥校验
-├── config.py                   # 本地模型工厂、四档缓存和任务参数
-├── claims_agent.py             # 端到端入口与明确标注的离线演示
-├── confidence_system.py        # 置信度公共入口，复用agents实现
-├── requirements.txt            # 主项目及传递依赖精确锁定
+claims-ai-agent/
+├── app.py                      # FastAPI 路由、lifespan、SSE、工作台接口
+├── settings.py                 # Pydantic 环境配置与密钥校验
+├── config.py                   # 模型工厂、缓存和任务参数
+├── claims_agent.py             # 理赔端到端入口与离线演示
+├── confidence_system.py        # 置信度公共入口
+├── logging_setup.py            # 日志、请求 ID、轮转与脱敏
+├── monitoring.py               # Prometheus 业务指标
+├── health_check.py             # HTTP 健康与状态机验证
+├── requirements.txt            # 主要依赖版本锁定（完整冻结见 requirements-py315.lock.txt）
 ├── .env.example                # 环境模板，不包含真实密钥
-├── agents/                     # 审核编排、风险分析、置信度、记忆和中间件
-│   ├── __init__.py             # Python包声明
-│   ├── claim_agent.py          # LangGraph、Send并行、HITL、规划执行
-│   ├── assistant_agent.py      # 对话助手 LangGraph 多节点编排（方案A）
-│   ├── risk_agent.py           # 结构化专家意见与本地模型调用
-│   ├── confidence.py           # Softmax/熵/贝叶斯/融合/温度/ECE
-│   ├── memory.py               # 窗口、摘要、实体冲突与Redis持久化
-│   ├── middleware_audit.py     # 模型层：脱敏、限流、缓存、重试、审计、Token统计
-│   ├── http_middleware.py      # 接入层：请求ID、认证、限流、审计、异常兜底（ASGI）
-│   ├── audit_store.py          # 审计库：append-only + 哈希链（SQLite，可换Postgres）
-│   ├── middleware.py           # 中间件公共入口（两层统一导出）
-│   ├── observability.py        # LangFuse v2嵌套追踪和脱敏回调
-│   └── deep_claims_agent.py    # 独立Deep Agents环境的延迟入口
-├── tools/                      # 八类业务工具及模型、检索、回写能力
-│   ├── __init__.py             # Python包声明
-│   ├── policy_tool.py          # 保单及理赔历史查询
-│   ├── medical_tool.py         # 异步医保核验
-│   ├── claim_tool.py           # 工具注册、审批绑定与并行消息闭环
-│   ├── llm_calls.py            # 同步与流式调用
-│   ├── rag_retrieval.py        # 理赔条款加载、Milvus/Lite、混合检索及引用校验
-│   ├── investment_rag.py       # 投资 Wiki 加载与投资 RAG 入口
-│   ├── knowledge_rag.py        # 通用知识库：多路召回 + RRF + rerank + 回答
+├── static/                     # 工作台前端（index.html / app.js / styles.css）
+├── agents/                     # 接入层、对话/理赔编排、审计、可观测性
+│   ├── http_middleware.py      # 请求 ID、认证、限流、审计、异常兜底
+│   ├── claim_agent.py          # 理赔 LangGraph、Send 并行、HITL
+│   ├── assistant_agent.py      # 对话助手 LangGraph 多节点编排
+│   ├── investment_agent.py     # 投资域图与演示
+│   ├── risk_agent.py           # 结构化专家意见与模型调用
+│   ├── audit_store.py          # append-only + 哈希链审计
+│   ├── middleware_audit.py     # 模型层：脱敏、限流、缓存、重试、审计
+│   └── ...
+├── tools/                      # 业务工具、RAG、Milvus、rerank、文档解析
+│   ├── knowledge_rag.py        # 通用知识库多路召回 + RRF + rerank
+│   ├── investment_rag.py       # 投资 Wiki RAG
+│   ├── rag_retrieval.py        # 理赔条款检索与引用校验
 │   ├── rerank.py               # BGE-Reranker HTTP 客户端与词项降级
-│   ├── vector_store.py         # 通用 Milvus 集合与可达性检查
-│   ├── policy_store.py         # 本地SQLite保单数据源（模拟数据）
-│   └── claim_write_producer.py # 幂等Outbox、重试及对账
-├── data/knowledge_base/        # 通用知识库源文档（Markdown/TXT/PDF/DOCX/HTML）
-├── adapters/                   # 真实接口与演示后端，未配置显式失败
-├── agent_core/                 # Agent 内核：领域注册与意图路由（不可命名为 platform，会遮蔽标准库）
-├── vendor/                     # 无 cp315 wheel 时使用的预构建纯 Python wheel（PyYAML）
-├── prompts/                    # 四场景模板、动态规则与本地固定版本
-├── models/                     # Pydantic契约、有限修复和Schema迁移
-├── tests/                      # 单元、SDK协议、状态机、HTTP与可选Milvus集成
-├── demos/                      # 参数/消息/本地接口/LangFuse演示及Mermaid源码
-├── isolated_deep/              # 官方Deep Agents独立依赖、运行时和测试
-├── scripts/                    # 安装验证、一键启动、知识库索引、审计链校验、Schema迁移与本地BGE-M3/Reranker服务
-├── deploy/                     # 对拍、门禁、环境配置、监控告警和运维手册
-├── monitoring.py               # Prometheus六组业务指标
-├── health_check.py             # 三条HTTP健康与状态机验证
-├── Dockerfile                  # 非root、8001端口、单工作进程
-├── docker-compose.yml          # 应用及Redis/Milvus基础设施
-├── docker-compose.langfuse.yml # 独立自托管LangFuse
-├── deploy.sh                   # 固定镜像版本发布与失败回退
-└── .github/workflows/deploy.yml # 检查、测试、容器集成、构建及可选发布
+│   ├── vector_store.py         # Milvus 集合与可达性检查
+│   └── ...
+├── adapters/                   # 真实业务适配器与 demo 后端
+├── agent_core/intent/          # 意图路由（JEV/LLM/Hybrid）+ adapter 主链路接入点
+├── data/
+│   ├── investment_wiki/        # 投资知识库源文件（当前约 55 chunks）
+│   ├── knowledge_base/         # 通用知识库源文件
+│   └── intent_golden.jsonl     # 意图评测集
+├── configs/                    # 领域与意图注册配置
+├── docs/                       # 架构、RAG、结构化输出等文档
+├── scripts/                    # 启动、构建索引、验证、embed 服务、VPS 部署
+│   ├── embed_server.py         # BGE-M3 / Reranker HTTP 服务
+│   ├── deploy_vps.sh           # 当前实际使用的 rsync + Compose 部署脚本
+│   └── ...
+├── tests/                      # 单元、状态机、HTTP、RAG 与可选 Milvus 集成测试
+├── demos/                      # 参数/消息/本地接口/链路图演示
+├── deploy/                     # 回归门禁、shadow、监控告警与运维手册
+├── isolated_deep/              # 可选：官方 Deep Agents 独立依赖与运行时
+├── vendor/                     # 3.15 下使用的纯 Python PyYAML wheel
+├── Dockerfile                  # app 镜像（Python 3.14，非 root，单 worker）
+├── Dockerfile.embed            # BGE-M3 / Reranker 镜像（Python 3.12）
+├── docker-compose.yml          # 本地/开发 Compose（Redis/Milvus 可选 infra profile）
+├── docker-compose.prod.yml     # 单机生产形态（app + embed，bind mount）
+├── docker-compose.langfuse.yml # 可选：自托管 LangFuse
+├── deploy.sh                   # 固定镜像版本发布与回退（模板流程）
+└── .github/workflows/deploy.yml # CI；当前 push 仅 main 触发，deploy job 尚未与 rsync 流程对齐
 ```
 
 agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
+
+> 当前语料规模：投资 Wiki 约 55 个 chunk，通用知识库只有少量示例文档（约 3 个 chunk）；理赔条款语料尚未内置，真实理赔条款检索需要另行建库。
 
 > `agent_core/` 原名 `platform/`，与标准库同名会遮蔽 `platform` 模块，导致 `coverage`、`setuptools` 等直接报 `module 'platform' has no attribute ...`。已重命名为 `agent_core/`，并同步更新 `scripts/eval_intent.py` 与 `tests/test_intent_*.py` 的导入；新增代码不要再用 `platform` 作为包名。
 
@@ -325,10 +370,14 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
 ### 方案 A（已实现）：无状态多节点图
 
-- 图节点：`classify`（意图分类）→ 条件路由 → `policy_query` / `material_gate` → `follow_up`
+- 图节点：`classify`（IntentRouter 意图路由）→ 条件路由 → `policy_query` / `material_gate` → `follow_up` / `formal_review`
+- 意图路由由 `app.py` 启动时构建一次（`build_assistant_intent_router`）；代码默认 `shadow`，
+  当前 `.env` 为 `hybrid`：JEV 主路由 + LLM 兜底；路由异常时回落 `assistant_agent`
+  内置分类模型，SSE 不中断
 - 图负责编排决策，LLM 流式回答由外层执行器（`app.py` 的 `assistant_stream`）负责
 - 无 checkpointer，每次请求新建图，状态仍由前端回传（history / material_round）
-- 详细结构见 [Architecture.md](Architecture.md)
+- 详细结构见 [Architecture.md](Architecture.md)，意图路由细节见
+  [docs/platform-architecture-workflow.md](docs/platform-architecture-workflow.md)
 
 ### 方案 B（规划中）：有状态图 + 断点续跑
 
@@ -347,7 +396,7 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 
 ## 安装和离线验证（Windows；macOS 见上文「macOS 快速启动」）
 
-在项目根目录执行。项目要求 Python 3.12+；当前开发环境为 Python 3.15（Windows 无需 C 编译器）。`requirements.txt` 为精确锁定版本，完整冻结见 `requirements-py315.lock.txt`。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务；macOS/Linux 可改用本地 `./.data/milvus.db`。
+在项目根目录执行。主项目最低 Python 3.12+，本地开发/测试使用 Python 3.15；app 容器为 Python 3.14，embed 容器为 Python 3.12。`requirements.txt` 为主依赖锁定，完整冻结见 `requirements-py315.lock.txt`。Windows 不安装 `milvus-lite`（仅支持 Linux/macOS），RAG 需连接外部 Milvus 服务；macOS/Linux 可改用本地 `./.data/milvus.db`。
 
 3.15 适配要点：部分旧锁定版本没有 `cp315` Windows wheel，已做最小升级；`PyYAML 6.0.3` 官方无 `cp315` wheel，改用 `vendor/pyyaml-6.0.3-py3-none-any.whl`（纯 Python 构建，功能等价，仅关闭 libyaml C 加速），因此无需安装 Visual C++ 生成工具。
 
@@ -360,7 +409,7 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 | PyYAML | 6.0.3 | 6.0.3（纯 Python wheel） | 官方无 cp315 wheel，见 `vendor/` |
 | ruff | 0.9.10 | 不变 | 自带 `py3-none-win_amd64` wheel |
 
-> 验证结果：`pip check` 无依赖冲突；本轮测试集在 macOS 上为 **169 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例），Windows 未在本轮复测。
+> 验证结果：`pip check` 无依赖冲突；本轮测试集在 macOS 上为 **182 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例），Windows 未在本轮复测。
 
 Windows（PowerShell）：
 
@@ -456,26 +505,35 @@ bash scripts/start_mac.sh --no-reload  # 关闭热重载
 .venv-py315/bin/uvicorn app:app --host 127.0.0.1 --port 8001
 ```
 
-启动后访问 `http://127.0.0.1:8001/` 使用理赔智能助手。页面采用普通对话形式，支持多轮意图识别、PDF/DOCX/文本抽取、图片视觉识别，以及结合识别结果的流式问答。点击“载入演示”可用固定合成案件运行完整状态机，查看报案、保单、三专家、置信度和决策链路；该入口不调用真实业务系统，生产环境自动禁用。分类器读取最近六条消息和上一轮意图：省略主语的追问继承当前主题，明确的新问题允许切换主题。材料审核会按附件类型核查保单信息、事故/出险证明和费用/损失凭证；缺失时保留累计附件并最多回流追问三轮，仍不完整则建议转人工，材料补齐后轮次清零并继续理赔链路。五类理赔意图进入理赔专用提示和合规约束；一般咨询交给通用基模回答。附件仅在请求内存中处理，不落盘；图片识别要求配置的模型支持 OpenAI 兼容多模态消息。
+启动后访问 `http://127.0.0.1:8001/` 使用智能业务助手。页面采用普通对话形式，支持理赔、投资和通用咨询，支持多轮意图识别、PDF/DOCX/文本抽取、图片视觉识别，以及结合识别结果的流式问答。点击“离线载入演示”可用固定合成案件运行完整状态机，查看报案、保单、三专家、置信度和决策链路；“真实理赔演示”会调用真实模型和内存条款跑判责 RAG，但不连接真实业务系统。两个入口都在生产环境自动禁用。页面右侧「调用链路 → 平台内核 → 领域意图路由」会显示实际引擎（JEV / LLM / 内置分类）、是否兜底和影子一致性，消息意图徽章也会带引擎标签；IntentRouter 读取最近 12 轮对话和上一轮意图（作为 active_domain 提示）：省略主语的追问继承当前主题，明确的新问题允许切换主题。材料审核会按附件类型核查保单信息、事故/出险证明和费用/损失凭证；缺失时保留累计附件并最多回流追问三轮，仍不完整则建议转人工，材料补齐后轮次清零并继续理赔链路。五类理赔意图进入理赔专用提示和合规约束；投资/一般咨询交给对应提示和通用基模回答。附件仅在请求内存中处理，不落盘；图片识别要求配置的模型支持 OpenAI 兼容多模态消息。
 
 也可先停止8001端口的现有本项目服务，再运行`bash scripts/verify.sh`完成启动与pytest两条验证链路（`scripts/*.sh`为Bash脚本，Windows需在Git Bash或WSL中运行）。
 
 | 路由 | 行为 |
 | --- | --- |
-| GET /health | 仅进程存活，不代表模型可用 |
-| GET /ready | 就绪探针：检查理赔图与审计库，未就绪返回 503 |
+| GET /health | 仅进程存活，不代表模型、embedding 或 reranker 可用 |
+| GET /ready | 就绪探针：检查理赔图与审计库，未就绪返回 503；当前不检查 embedding/reranker |
 | POST /api/claims/process | 创建审核工作流；缺保单号进入补材料中断 |
 | POST /api/demo/claims/process | 用固定合成案件运行完整理赔状态机；仅非生产环境 |
+| POST /api/demo/claims/process-live | 用真实模型 + 内存条款跑完整判责演示；仅非生产环境 |
+| POST /api/demo/investment/process | 用固定合成组合运行投资域演示；仅非生产环境 |
 | GET /api/claims/{claim_id} | 查询已持久化案件状态 |
-| POST /api/claims/{claim_id}/supplement | 仅补材料阶段接受policy_id |
-| POST /api/claims/{claim_id}/review | X-Reviewer-Key认证后恢复人工审核 |
-| GET /metrics | Prometheus格式指标 |
-| GET /docs | 自动生成的接口文档 |
-| GET / | 理赔智能工作台 |
-| POST /api/documents/analyze | 内存解析并识别最多6份理赔单证 |
-| POST /api/assistant/stream | 结合案件和单证上下文流式问答 |
+| POST /api/claims/{claim_id}/supplement | 仅补材料阶段接受 policy_id |
+| POST /api/claims/{claim_id}/review | X-Reviewer-Key 认证后恢复人工审核 |
+| POST /api/investment/rag/search | 只读检索投资知识库，返回引用，不生成交易建议 |
+| GET /api/rag/domains | 列出已配置的知识库 domain |
+| POST /api/rag/search | 通用知识库多路召回 + RRF + rerank，返回 Top-K 片段和引用 |
+| POST /api/rag/answer | 检索后生成答案，并校验 citation_ids 只能来自本轮结果 |
+| POST /api/investment/process | 投资咨询/组合诊断；交易指令二次确认前暂停 |
+| POST /api/investment/{request_id}/confirm | 交易二次确认，进入人工审批，不执行下单 |
+| POST /api/investment/{request_id}/review | 审核员审批投资指令 |
+| GET /metrics | Prometheus 格式指标（需要认证） |
+| GET /docs | 自动生成的接口文档；生产环境建议关闭 |
+| GET / | 智能业务工作台 |
+| POST /api/documents/analyze | 内存解析并识别最多 6 份理赔单证 |
+| POST /api/assistant/stream | 结合案件、单证和历史上下文的流式问答（理赔/投资/通用） |
 
-请求支持description或claim_text，以及可选policy_id、amount。返回的是审核建议，不执行支付。SQLite检查点保存在`.data/checkpoints.sqlite`，重启可恢复。拒赔需授权人工提供条款依据；低置信度、证据不足和大额转人工。生产必须配置CLAIMS_API_KEY和REVIEWER_API_KEY；示例不支持多租户行级权限，也不能直接横向扩容。
+请求支持 description 或 claim_text，以及可选 policy_id、amount。理赔返回的是审核建议，不执行支付。SQLite 检查点保存在 `.data/checkpoints.sqlite`，重启可恢复。拒赔需授权人工提供条款依据；低置信度、证据不足和大额转人工。生产必须配置 `CLAIMS_API_KEY` 和 `REVIEWER_API_KEY`；示例不支持多租户行级权限，也不能直接横向扩容。
 
 ## 接入层中间件（认证 / 限流 / 审计）
 
@@ -508,9 +566,9 @@ python -m scripts.audit_verify --limit 10   # 校验哈希链，退出码 0 = �
 
 ## 本地模型与可选云端
 
-`.env.example` 默认 `MODEL_PROVIDER=deepseek`，即开箱走 DeepSeek；必须提供 `DEEPSEEK_API_KEY`，否则启动时配置校验失败。少量调试可直接用 `bash scripts/set_deepseek_key.sh` 写入并验证，脚本会检查 key 是否有效、`DEEPSEEK_FLASH_MODEL`/`DEEPSEEK_PRO_MODEL` 是否在账号可用列表中。
+`.env.example` 默认 `MODEL_PROVIDER=local`，使用 LOCAL_LLM_BASE_URL/API_KEY 和 LOCAL_FAST/MAIN/PRO/VISION_MODEL，名称必须与推理服务实际注册名一致。本地服务端口默认 8000，应用端口 8001。设置 `MODEL_PROVIDER=local` 时需自备模型（Ollama / vLLM / LM Studio）并先启动推理服务。
 
-代码内置缺省（无 `.env` 时）仍是 `local`：使用 LOCAL_LLM_BASE_URL/API_KEY 和 LOCAL_FAST/MAIN/PRO/VISION_MODEL，名称必须与推理服务实际注册名一致。本地服务端口默认8000，应用端口8001。设置 `MODEL_PROVIDER=local` 可切回本机推理（需自备模型：Ollama / vLLM / LM Studio）。
+如果使用 DeepSeek，运行 `bash scripts/set_deepseek_key.sh` 写入并验证密钥；脚本会检查 key 是否有效、`DEEPSEEK_FLASH_MODEL`/`DEEPSEEK_PRO_MODEL` 是否在账号可用列表中。选择 `deepseek` 但未配置 `DEEPSEEK_API_KEY` 时，启动会因配置校验失败而拒绝启动。
 
 设置MODEL_PROVIDER=bailian时使用OPENAI_BASE_URL/API_KEY及QWEN_*_MODEL；已有百炼密钥无需删除，但不会自动用于其他模式。三个qwen别名分别映射通用、强推理、轻量模型。
 
@@ -651,6 +709,31 @@ curl -s http://127.0.0.1:8001/api/rag/answer \
 - 投资知识库 RAG：`data/investment_wiki/` 存放公开投资者教育 Wiki；`tools/investment_rag.py` 复用通用知识库的 **BGE-M3 向量 + BM25 + 元数据** 三路召回与加权 RRF，再交给 BGE-Reranker 精排。投资咨询对话会先检索知识并注入 `[K1]` 引用；向量/rerank 服务不可用时自动降级。`POST /api/investment/rag/search` 可只读检索；`python scripts/build_investment_rag.py` 构建向量索引。详见 [docs/investment-rag.md](docs/investment-rag.md)。
 - 通用知识库 RAG：`data/knowledge_base/` 支持 Markdown/TXT/PDF/DOCX/HTML，`tools/knowledge_rag.py` 实现 **dense + BM25 + 元数据三路召回 → 加权 RRF → BGE-Reranker → Top-K/LLM 回答**。接口：`POST /api/rag/search`（片段 + 引用 + 召回诊断）、`POST /api/rag/answer`（答案 + citation_ids 校验）、`GET /api/rag/domains`。`python scripts/build_knowledge_rag.py --domain general` 构建索引；模型/服务不可用时自动降级为词项重排。详见 [docs/knowledge-rag.md](docs/knowledge-rag.md)。
 - `ClaimContextManager`可注入Redis客户端、摘要链和实体抽取器；Qwen需注入匹配模型的token_counter，默认cl100k_base只作教学计数，首次使用需准备tiktoken缓存。
+
+## 当前状态与已知边界（2026-10-27）
+
+**已具备**
+
+- 理赔、投资、通用问答三条链路可运行，前端工作台支持对话、附件上传和链路可视化；
+- 意图路由已接入 `/api/assistant/stream`：JEV / LLM / Hybrid / Shadow 可切换，默认影子模式；
+- BGE-M3 + BGE-Reranker 已启用，正常检索返回 `rerank_fallback=false`；
+- 索引已建成：`investment_wiki` 约 55 个 chunk，`knowledge_general` 约 3 个 chunk；
+- `182 passed, 1 skipped`，覆盖率约 83%；审计哈希链、请求 ID、PII 脱敏和 RAG 诊断字段可用；
+- 线上 `/ai/` 已通过 nginx Basic Auth 部署，`app` 容器只监听 `127.0.0.1:8001`。
+
+**仍需完善**
+
+- **JEV 已接管主路由（hybrid）**：主链路已接入，当前 `.env` 为 `INTENT_ENGINE=hybrid`
+  （JEV 主 + LLM 兜底）；39 条评测集联合准确率 89.7%，领域 100%，
+  残余错误集中在「组合诊断 ↔ 投资咨询」，扩充语料前不要切 `jev` 单引擎。
+
+- **真实理赔闭环**：`BusinessBackend` 目前只内置 `query_policy`，`verify_claim_evidence` 需要显式注册适配器；`CORE_QUERY_URL` 为空时真实案件会安全降级为转人工。真实上线前需接保单、单证核验、通知/支付，并补契约测试。
+- **理赔条款语料**：代码支持 `claims_<险种>` 集合与条款引用校验，但仓库没有内置真实条款语料，当前主要使用演示条款。
+- **RAG 评测**：已有意图评测集，但缺少覆盖投资/通用/理赔的 golden QA、Recall@K/MRR/nDCG/引用准确率回归。
+- **Reranker 就绪**：`scripts/embed_server.py` 只预加载 embedding，reranker 为懒加载；`/health` 在 reranker 未加载时仍可能返回 ok，首次检索会多几秒。
+- **单机限制**：SQLite + Milvus Lite 只适合单进程；多副本前需换 Postgres/Redis + 远程 Milvus，并避免多进程写同一个 Lite 文件。
+- **安全与运维**：线上仍是 `APP_ENV=development` + nginx Basic Auth；需要更换默认弱口令，补充 nginx 限流、SSH 密钥登录、Docker 日志轮转、`.data` 备份和外部监控。
+- **CI/CD**：`.github/workflows/deploy.yml` 当前只在 `main` 的 push 触发；deploy job 仍假设“服务器 Git 仓库 + `deploy.sh`”，与当前 `scripts/deploy_vps.sh` 的 rsync 流程不一致，需要二选一统一。
 
 ## 部署到 VPS：`/ai` 子路径（已验证）
 
