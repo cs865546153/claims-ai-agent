@@ -78,6 +78,7 @@ def build_assistant_intent_router(cfg: Settings, intent_model: Any = None) -> An
     from agent_core.intent.factory import IntentConfig, build_intent_classifier
 
     def log_decision(decision: RouteDecision) -> None:
+        # 这是兜底后的最终决策；主路由尝试与异常原因见 claims.intent 的 intent.primary_* 日志。
         # 只记录意图元数据，不记录用户原文；影子字段用于 JEV/LLM 对拍。
         logger.info(
             'intent.route engine=%s domain=%s intent=%s confidence=%.3f margin=%s '

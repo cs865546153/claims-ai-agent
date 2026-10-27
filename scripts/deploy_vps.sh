@@ -81,4 +81,7 @@ ssh "$REMOTE" "cd '$REMOTE_DIR' && docker compose -f '$COMPOSE_FILE' up -d --no-
 echo "==> 健康检查"
 ssh "$REMOTE" "for i in \$(seq 1 30); do if curl -fsS http://127.0.0.1:8001/health >/dev/null 2>&1; then curl -fsS http://127.0.0.1:8001/ready && echo && exit 0; fi; sleep 2; done; echo '健康检查超时' >&2; exit 1"
 
+echo "==> 意图路由配置（服务器 .env，rsync 不同步）"
+ssh "$REMOTE" "cd '$REMOTE_DIR' && { grep -E '^(INTENT_ROUTER_ENABLED|INTENT_ENGINE)=' .env || echo 'INTENT_* 未配置（代码默认 shadow）'; } ; grep -Eq '^JEV_API_KEY=.+' .env && echo 'JEV_API_KEY=set' || echo 'JEV_API_KEY=missing'"
+
 echo "==> 完成：https://aiwanxiang.top/ai/"

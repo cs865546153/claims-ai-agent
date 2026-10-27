@@ -181,6 +181,12 @@ cp .env.example .env && chmod 600 .env
 > 没配 `JEV_API_KEY` 时影子会自动跳过，服务照常启动；`INTENT_ENGINE=jev/hybrid`
 > 但缺 key 时主链路回落内置分类并记录 warning。JEV 是英文优先模型，中文场景可开
 > `INTENT_TRANSLATE_TO_ENGLISH=true`。2026-10-27 评测：39 条样本联合准确率 89.7%。
+>
+> JEV 网关偶发 `529 model busy` 时，`JEV_MAX_RETRIES`（默认 2）会按
+> `JEV_RETRY_BACKOFF_S`（默认 0.25s）做指数退避重试。`intent.route` 是兜底后的最终
+> 结果；主路由尝试看 `intent.primary_low_confidence` / `intent.primary_failed`，
+> 重试看 `intent.jev_retry`。当前翻译开关在 DeepSeek 下会因 JSON 模式报 400，
+> 启用前需先改用 text 模式模型。
 
 改完自检：
 
@@ -792,7 +798,15 @@ RERANK_BASE_URL=http://embed:8010/v1
 RERANK_ENABLED=true
 VECTOR_STORE_URI=/app/.data/milvus.db
 LOG_FILE=/app/.data/logs/app.log
+# 意图路由：服务器 .env 独立维护，deploy_vps.sh 不会同步
+INTENT_ROUTER_ENABLED=true
+INTENT_ENGINE=hybrid
+JEV_API_KEY=...
 ```
+
+> `scripts/deploy_vps.sh` 会排除 `.env` / `.env.*`，所以 `INTENT_*` 和 `JEV_*` 改完必须
+> 在服务器执行 `docker compose -f docker-compose.prod.yml up -d --force-recreate app`；
+> 改完可看 `docker compose ... logs app | grep intent.route` 是否出现 `engine=jev`。
 
 前端当前不发送 `X-API-Key`，所以公网访问不要直接使用 `APP_ENV=production`，否则页面会收到 401。公网保护由 nginx Basic Auth 承担；如果以后改成生产模式，需要同时给前端加 API Key 注入或改用服务端会话。
 

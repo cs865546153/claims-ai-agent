@@ -240,13 +240,17 @@ intake → policy（保单/证据核验）→ experts（Send 并行三专家）�
 - `agent_core/intent/adapter.py`：`AssistantIntentRouter` 把工作台请求转成
   `IntentRequest`，并把 `RouteDecision` 转成 `IntentResult`（含保单号兜底抽取）。
 - `agent_core/intent/jev.py`：`JevIntentClassifier`，调用 `ateve-jev-v1` 兼容接口；
-  `POST {JEV_BASE_URL}`，Bearer 认证，一次请求同时返回 `domain` 与 `intent`。
+  `POST {JEV_BASE_URL}`，Bearer 认证，一次请求同时返回 `domain` 与 `intent`；
+  对 `429` / `5xx`（含网关 `529 model busy`）按 `JEV_MAX_RETRIES` 做指数退避重试。
 - `agent_core/intent/llm.py`：LLM 路由器，中文场景默认主路由，也是 JEV 的兜底。
 - `agent_core/intent/hybrid.py`：主路由 + 兜底 + 影子组合；影子并行执行，只记录不生效。
+  主路由异常记 `intent.primary_failed`，低置信记 `intent.primary_low_confidence`，
+  最终结果再由 `app.py` 记 `intent.route`。
 - `agent_core/intent/factory.py`：`shadow / hybrid / jev / llm` 四种预设。
 - `agent_core/intent/registry.py` + `configs/domains.yaml`：领域/意图注册表，JEV 使用
   `description_en`，新增意图时务必补英文描述。
-- `settings.py` / `.env.example`：`INTENT_ROUTER_ENABLED`、`INTENT_*`、`JEV_*`。
+- `settings.py` / `.env.example`：`INTENT_ROUTER_ENABLED`、`INTENT_*`、`JEV_*`，
+  重试相关为 `JEV_MAX_RETRIES`（默认 2）和 `JEV_RETRY_BACKOFF_S`（默认 0.25）。
 - 测试：`tests/test_intent_jev.py`、`tests/test_intent_hybrid.py`、
   `tests/test_intent_registry.py`、`tests/test_intent_router_integration.py`。
 - 评测：`scripts/eval_intent.py` + `data/intent_golden.jsonl`。
@@ -278,6 +282,9 @@ intake → policy（保单/证据核验）→ experts（Send 并行三专家）�
   代码默认仍是 `shadow`，新环境未配 key 时会自动跳过 JEV 影子。
 - 2026-10-27 实测：39 条评测集 JEV 联合准确率 `0.897`、领域 `1.000`、P50/P95 `571/628ms`；
   真实 SSE 验证 `engine=jev` 命中交易指令、保单查询，低置信样例正确触发 `fallback_used=true`。
+- 2026-10-27 VPS 实测：JEV 网关偶发 `529 model busy`（直连 20 次失败 2 次）；已加
+  `429/5xx` 重试。`intent.route` 记录的是兜底后的最终结果，主路由尝试看
+  `intent.primary_low_confidence` / `intent.primary_failed`，重试看 `intent.jev_retry`。
 - `INTENT_ROUTER_ENABLED=false` 可整体关闭路由层；`INTENT_ENGINE=jev/hybrid` 但缺
   key 时 `build_assistant_intent_router()` 返回 `None`，主链路回落内置分类。
 - SSE `classification` trace 新增：`engine`（`jev`/`llm`/`llm-prompt`）、
@@ -318,7 +325,12 @@ intake → policy（保单/证据核验）→ experts（Send 并行三专家）�
 - `参考资料 / 参考来源 / 参考文献 / 延伸阅读 / 相关链接` 章节不进入索引。
 - 纯风险提示/短免责声明块会被过滤。
 - 通用知识库支持 `.md/.txt/.pdf/.docx/.html`。
-- 投资 RAG 三路召回权重：`dense=0.55`、`bm25=0.30`、`metadata=0.15`，RRF `k=60`。
+- 通用知识库与投资 Wiki 共用 `KnowledgeBase`，三路召回：
+  - `dense`：BGE-M3 embedding + Milvus，语义召回；
+  - `bm25`：本地 `BM25Okapi`，中文按“单字 + 双字”切 token，负责专名/数字精确匹配；
+  - `metadata`：`title / chapter / topic / source` 精确匹配 + token 重叠。
+- 三路权重：`dense=0.55`、`bm25=0.30`、`metadata=0.15`，加权 RRF `k=60`，再交 BGE-Reranker 精排。
+- 向量不可用：自动降级为 `bm25 + metadata` 两路，`vector_ready=false`，原因写进 `route_errors`。
 - `RERANK_TOP_N` 是进入 BGE-Reranker 的候选池上限；实际候选数为
   `min(fused_count, RERANK_TOP_N)`，并至少保留 Top-K。
 - BGE 不可用时自动降级为词项重排，`rerank_fallback=true`；失败后默认冷却 60 秒。
@@ -358,6 +370,9 @@ python scripts/build_knowledge_rag.py --domain general
 ### 理赔 RAG
 
 - 理赔条款使用独立集合 `claims_<insurance_type>`。
+- 理赔条款走 `tools/rag_retrieval.py` 的 `HybridRetriever`，只有 `vector + bm25` 两路，
+  默认权重 `0.7/0.3`、加权 RRF `k=60`，并按 `insurance_type / version` 过滤；
+  不要和通用/投资知识库的三路召回混淆。
 - 默认 `drop_old=False`，不要随意自动清空。
 - 仓库没有内置真实条款语料；演示用 `tools/demo_clauses.py` 的合成条款。
 - 修改理赔检索行为时必须跑相关测试，不要影响投资/通用 RAG。
@@ -433,7 +448,7 @@ bash scripts/verify.sh
 
 当前基线（2026-10-27 接入意图路由后实跑）：
 
-- 全量测试：`182 passed, 1 skipped`，约 8.5s。
+- 全量测试：`188 passed, 1 skipped`，约 6.4s（含 JEV 429/5xx 重试用例）。
 - 跳过项：`tests/test_milvus_integration.py`，需要真实 Milvus。
 - 已知无害日志：测试结束时 `milvus_lite` 可能打印
   `ValueError: I/O operation on closed file`，不影响结果。
@@ -483,6 +498,9 @@ bash scripts/verify.sh
   主要残余混淆是「组合诊断 ↔ 投资咨询」，扩充语料前不要切 `jev` 单引擎。
 - **JEV 中文边界仍不稳**：官方定位英文优先；39 条合成样本联合准确率 89.7%，
   错误集中在「组合诊断 ↔ 投资咨询」；当前用 `hybrid` + LLM 兜底，暂不切单引擎。
+- **翻译开关当前不可用**：`LLMTranslator` 复用 `classification` 模型（`json_object`），
+  DeepSeek 会因 prompt 不含 “json” 返回 400；开启 `INTENT_TRANSLATE_TO_ENGLISH=true`
+  前需先改为 text 模式模型，并重新跑评测。
 - **真实理赔闭环未完成**：`BusinessBackend` 只内置 `query_policy`，
   `verify_claim_evidence` 需注册适配器；`CORE_QUERY_URL` 为空时安全降级为转人工。
 - **真实条款语料缺失**：支持 `claims_<险种>` 集合，但仓库没有真实条款，主要用演示条款。

@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     jev_api_key: SecretStr = SecretStr('')
     jev_model: str = 'ateve-jev-v1'
     jev_timeout_s: float = 10.0
+    # JEV 网关偶发 429/5xx（含 529 model busy）时重试；请求只读，重试无副作用。
+    jev_max_retries: int = 2
+    jev_retry_backoff_s: float = 0.25
 
     @field_validator('local_llm_base_url', 'embedding_base_url', 'rerank_base_url', 'deepseek_base_url',
                      'openai_base_url', 'jev_base_url', 'langfuse_host')

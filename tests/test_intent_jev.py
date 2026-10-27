@@ -165,9 +165,117 @@ def test_jev_http_error_raises() -> None:
                 base_url="https://example.test/jev",
                 api_key="test-key",
                 client=client,
+                max_retries=0,
             )
             with pytest.raises(JevError):
                 await classifier.classify(_request())
+
+    asyncio.run(scenario())
+
+
+def test_jev_retries_529_then_succeeds() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(529, json={"detail": "model busy"})
+            return httpx.Response(200, json=_response())
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            classifier = JevIntentClassifier(
+                registry=DomainRegistry.default(),
+                base_url="https://example.test/jev",
+                api_key="test-key",
+                client=client,
+                max_retries=2,
+                retry_backoff_s=0.0,
+            )
+            decision = await classifier.classify(_request())
+
+        assert calls == 2
+        assert decision.intent == "理赔报案"
+        assert decision.engine == "jev"
+
+    asyncio.run(scenario())
+
+
+def test_jev_retry_exhausted_on_529() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(529, json={"detail": "model busy"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            classifier = JevIntentClassifier(
+                registry=DomainRegistry.default(),
+                base_url="https://example.test/jev",
+                api_key="test-key",
+                client=client,
+                max_retries=2,
+                retry_backoff_s=0.0,
+            )
+            with pytest.raises(JevError, match="HTTP 529"):
+                await classifier.classify(_request())
+
+        assert calls == 3
+
+    asyncio.run(scenario())
+
+
+def test_jev_does_not_retry_4xx() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(400, text="bad request")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            classifier = JevIntentClassifier(
+                registry=DomainRegistry.default(),
+                base_url="https://example.test/jev",
+                api_key="test-key",
+                client=client,
+                max_retries=2,
+                retry_backoff_s=0.0,
+            )
+            with pytest.raises(JevError, match="HTTP 400"):
+                await classifier.classify(_request())
+
+        assert calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_jev_retry_count_is_capped() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(529, json={"detail": "model busy"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            classifier = JevIntentClassifier(
+                registry=DomainRegistry.default(),
+                base_url="https://example.test/jev",
+                api_key="test-key",
+                client=client,
+                max_retries=10,
+                retry_backoff_s=0.0,
+            )
+            with pytest.raises(JevError, match="HTTP 529"):
+                await classifier.classify(_request())
+
+        assert calls == 6  # 1 次原始请求 + 最多 5 次重试
 
     asyncio.run(scenario())
 

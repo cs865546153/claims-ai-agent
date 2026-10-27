@@ -40,6 +40,8 @@ class IntentConfig:
     jev_api_key: str = ""
     jev_model: str = "ateve-jev-v1"
     jev_timeout_s: float = 10.0
+    jev_max_retries: int = 2
+    jev_retry_backoff_s: float = 0.25
 
     @classmethod
     def from_settings(cls, settings: Any = None) -> "IntentConfig":
@@ -69,6 +71,8 @@ class IntentConfig:
             jev_api_key=api_key,
             jev_model=str(getattr(settings, "jev_model", "ateve-jev-v1")),
             jev_timeout_s=float(getattr(settings, "jev_timeout_s", 10.0)),
+            jev_max_retries=int(getattr(settings, "jev_max_retries", 2)),
+            jev_retry_backoff_s=float(getattr(settings, "jev_retry_backoff_s", 0.25)),
         )
 
 
@@ -133,6 +137,8 @@ def build_intent_classifier(
                 mask=effective_mask,
                 confidence_threshold=cfg.confidence_threshold,
                 margin_threshold=cfg.margin_threshold,
+                max_retries=cfg.jev_max_retries,
+                retry_backoff_s=cfg.jev_retry_backoff_s,
             )
         return jev
 

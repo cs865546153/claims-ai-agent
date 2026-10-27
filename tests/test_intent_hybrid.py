@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import httpx
 import pytest
@@ -21,6 +22,8 @@ from agent_core.intent.registry import DomainRegistry
 
 class FakeClassifier:
     """可注入成功结果或异常的分类器。"""
+
+    engine_name = "fake"
 
     def __init__(self, *, decision: RouteDecision | None = None, error: Exception | None = None) -> None:
         self.decision = decision
@@ -78,6 +81,30 @@ def test_low_confidence_uses_fallback() -> None:
     assert decision.fallback_used is True
     assert decision.fallback_reason == "low_confidence"
     assert fallback.calls == 1
+
+
+def test_low_confidence_logs_primary_decision(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="claims.intent")
+    hybrid = HybridIntentClassifier(
+        primary=FakeClassifier(decision=_decision(confidence=0.55, needs_clarification=True)),
+        fallback=FakeClassifier(decision=_decision(confidence=0.95)),
+    )
+    asyncio.run(hybrid.classify(_request()))
+    assert "intent.primary_low_confidence" in caplog.text
+    assert "confidence=0.550" in caplog.text
+    assert "fallback=fake" in caplog.text
+
+
+def test_primary_error_logs_actual_message(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="claims.intent")
+    hybrid = HybridIntentClassifier(
+        primary=FakeClassifier(error=RuntimeError("boom")),
+        fallback=FakeClassifier(decision=_decision(confidence=0.92)),
+    )
+    asyncio.run(hybrid.classify(_request()))
+    assert "intent.primary_failed" in caplog.text
+    assert "RuntimeError: boom" in caplog.text
+    assert "fallback=fake" in caplog.text
 
 
 def test_primary_error_uses_fallback() -> None:

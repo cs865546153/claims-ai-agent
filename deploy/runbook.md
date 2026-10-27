@@ -13,4 +13,29 @@
 
 LangFuse使用独立Compose文件，必须配置数据库密码、认证secret和salt；生产固定镜像digest。创建项目后将public/secret key写入未入库的.env，再运行 `python -m demos.langfuse_demo --invoke`。未看到实际Trace前，不算完成联调。
 
+## 部署易错点：意图路由配置
+
+- `scripts/deploy_vps.sh` 用 rsync 同步代码，但明确排除 `.env` / `.env.*`；
+  `INTENT_ROUTER_ENABLED`、`INTENT_ENGINE`、`JEV_API_KEY` 只在服务器
+  `/opt/claims-ai-agent/.env` 维护，不会随部署更新。
+- 只同步 `--static-only` 只更新前端，不重建镜像、不更新 `.env`。
+- 改完 `.env` 必须重建容器，否则 `env_file` 不生效：
+
+  ```bash
+  docker compose -f docker-compose.prod.yml up -d --force-recreate app
+  ```
+
+- 验证：
+
+  ```bash
+  docker compose -f docker-compose.prod.yml exec -T app \
+    python -c "import os; print(os.getenv('INTENT_ENGINE'), bool(os.getenv('JEV_API_KEY')))"
+  docker compose -f docker-compose.prod.yml logs --tail=50 app | grep -E 'intent\.(route|primary_|jev_retry)'
+  ```
+
+  正常应看到 `intent.route engine=jev ...`；若为 `engine=llm`，再查
+  `intent.primary_low_confidence`（低置信兜底）或 `intent.primary_failed`
+  （JEV 异常，含 529 重试后的最终错误）。`intent.jev_retry` 表示网关瞬时失败正在重试。
+  若完全没有 `intent.*`，通常是 `.env` 未配置或容器未重建。
+
 Prometheus告警规则覆盖材料六类指标；路由到Alertmanager的收件渠道由运维配置。本项目不会自动发送外部通知。受理比例只是教学参考区间，不能作为强制自动放行目标。

@@ -11,6 +11,8 @@ cjk_without_translation 警告，交由上层决定是否回落。
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -21,7 +23,13 @@ import httpx
 from .contracts import IntentRequest, RouteDecision
 from .registry import DomainRegistry
 
+LOGGER = logging.getLogger("claims.intent")
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _retryable_status(status_code: int) -> bool:
+    """429 与全部 5xx 视为网关瞬时失败；529（model busy）也属于这一类。"""
+    return status_code == 429 or status_code >= 500
 
 
 class JevError(RuntimeError):
@@ -71,6 +79,8 @@ class JevIntentClassifier:
         mask: Callable[[Any], Any] | None = None,
         confidence_threshold: float = 0.8,
         margin_threshold: float = 0.2,
+        max_retries: int = 2,
+        retry_backoff_s: float = 0.25,
     ) -> None:
         if not base_url:
             raise ValueError("JEV base_url 不能为空")
@@ -85,6 +95,10 @@ class JevIntentClassifier:
         self.mask = mask
         self.confidence_threshold = confidence_threshold
         self.margin_threshold = margin_threshold
+        # 只重试 429/5xx 这类网关瞬时错误；请求是只读分类，重试不会产生副作用。
+        # 上限 5 次，避免错误配置导致单次对话长时间占用。
+        self.max_retries = min(5, max(0, int(max_retries)))
+        self.retry_backoff_s = max(0.0, float(retry_backoff_s))
         self._client = client
         self._owns_client = False
 
@@ -165,23 +179,45 @@ class JevIntentClassifier:
         }
 
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            response = await self._http().post(
-                self.base_url,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-        except httpx.HTTPError as exc:
-            raise JevError(f"JEV 请求失败：{type(exc).__name__}") from exc
-        if response.status_code >= 400:
-            raise JevError(f"JEV HTTP {response.status_code}: {response.text[:300]}")
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise JevError("JEV 返回非 JSON") from exc
-        if not isinstance(data, dict):
-            raise JevError("JEV 返回格式无效")
-        return data
+        attempts = self.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await self._http().post(
+                    self.base_url,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                )
+            except httpx.HTTPError as exc:
+                raise JevError(f"JEV 请求失败：{type(exc).__name__}") from exc
+
+            if response.status_code >= 400:
+                error = JevError(f"JEV HTTP {response.status_code}: {response.text[:300]}")
+                if attempt < attempts and _retryable_status(response.status_code):
+                    await self._retry_sleep(attempt, response.status_code)
+                    continue
+                raise error
+
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise JevError("JEV 返回非 JSON") from exc
+            if not isinstance(data, dict):
+                raise JevError("JEV 返回格式无效")
+            return data
+
+        raise JevError("JEV 请求重试耗尽")  # pragma: no cover - 循环内总会返回或抛出
+
+    async def _retry_sleep(self, attempt: int, status_code: int) -> None:
+        delay = self.retry_backoff_s * (2 ** (attempt - 1))
+        LOGGER.warning(
+            "intent.jev_retry attempt=%d/%d status=%d delay_ms=%d",
+            attempt,
+            self.max_retries,
+            status_code,
+            int(delay * 1000),
+        )
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     def _parse(self, data: dict[str, Any], warnings: list[str]) -> RouteDecision:
         answers = data.get("answers")
