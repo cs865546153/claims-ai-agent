@@ -233,6 +233,8 @@ intake → policy（保单/证据核验）→ experts（Send 并行三专家）�
 **结论：JEV 路由层已接入主对话链路。代码默认 `shadow`（LLM 主路由 + JEV 影子）；
 当前仓库 `.env` 已配置 `JEV_API_KEY` 并设 `INTENT_ENGINE=hybrid`（JEV 主 + LLM 兜底）。**
 
+** 多agent 协作， 可以尝试使用 身份带入+jev意图识别 **
+
 代码与配置：
 
 - `app.py`：`build_assistant_intent_router(cfg, intent_model)` 启动时构建一次，
@@ -517,7 +519,7 @@ bash scripts/verify.sh
 | 文档 | 内容 |
 | --- | --- |
 | `README.md` | 安装、启动、接口、配置、VPS 部署 |
-| `Architecture.md` | 分层架构、两条主链路、SQLite 职责 |
+| `Architecture.md` | 分层架构、三条业务链路、RAG、意图路由与 SQLite 职责 |
 | `docs/knowledge-rag.md` | 通用 RAG、多路召回、rerank、审计诊断 |
 | `docs/investment-rag.md` | 投资 Wiki、索引构建、降级策略 |
 | `docs/platform-architecture-workflow.md` | 平台架构、意图路由、演进方向 |

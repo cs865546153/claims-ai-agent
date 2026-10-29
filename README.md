@@ -13,13 +13,14 @@
 
 项目最初基于理赔 Agent 培训材料，现已扩展为可本地运行、可容器化部署的多领域 RAG 应用。真实理赔仍需接入组织内的保单查询、单证核验、通知/支付等适配器；未配置时状态机会显式转人工，不返回假保单或虚构定损。
 
-**当前验证基线（2026-10-27）**：`182 passed, 1 skipped`，覆盖率约 83%；跳过项为需要真实 Milvus 的集成测试。完整逐项映射见 [实现验收清单](docs/implementation-matrix.md)，架构见 [Architecture.md](Architecture.md)，Agent 工作约定见 [AGENTS.md](AGENTS.md)。
+**当前验证基线（2026-10-27）**：`188 passed, 1 skipped`，覆盖率约 83%；跳过项为需要真实 Milvus 的集成测试。完整逐项映射见 [实现验收清单](docs/implementation-matrix.md)，架构见 [Architecture.md](Architecture.md)，Agent 工作约定见 [AGENTS.md](AGENTS.md)。
 
-三条主链路：
+主要链路：
 
 ```text
 /api/assistant/stream  -> 意图路由（JEV/LLM/Hybrid）-> 理赔 / 投资 / 通用问答（SSE）
 /api/claims/*          -> 理赔状态机（补材料、审核、恢复）
+/api/investment/*      -> 投资域图（咨询、交易二次确认、人工审批）
 /api/rag/*             -> 通用知识库检索与引用校验
 /api/investment/rag/*  -> 投资知识库只读检索
 ```
@@ -301,7 +302,7 @@ docker compose up -d --build
 
 Apple Silicon 上应用容器为 arm64。若 `--profile infra` 的 Milvus 拉不到 arm64 镜像，可对这些服务单独使用 `--platform linux/amd64`，或只启动 `app` 并指向外部 Milvus。
 
-> 本机验证（macOS 14.8.2 / Apple Silicon / Python 3.15.1）：`pip check` 无冲突，`pytest` 为 **182 passed, 1 skipped**（跳过项需真实 Milvus），`uvicorn app:app` 启动后 `/health`、`health_check.py` 均通过。国内网络安装依赖时请使用上面的清华镜像。
+> 本机验证（macOS 14.8.2 / Apple Silicon / Python 3.15.1）：`pip check` 无冲突，`pytest` 为 **188 passed, 1 skipped**（跳过项需真实 Milvus），`uvicorn app:app` 启动后 `/health`、`health_check.py` 均通过。国内网络安装依赖时请使用上面的清华镜像。
 
 ## 结构与职责
 
@@ -415,7 +416,7 @@ agents/tools/prompts/models/tests及新增Python包均有`__init__.py`。
 | PyYAML | 6.0.3 | 6.0.3（纯 Python wheel） | 官方无 cp315 wheel，见 `vendor/` |
 | ruff | 0.9.10 | 不变 | 自带 `py3-none-win_amd64` wheel |
 
-> 验证结果：`pip check` 无依赖冲突；本轮测试集在 macOS 上为 **182 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例），Windows 未在本轮复测。
+> 验证结果：`pip check` 无依赖冲突；本轮测试集在 macOS 上为 **188 passed, 1 skipped**（跳过的是需要真实 Milvus 服务的集成用例），Windows 未在本轮复测。
 
 Windows（PowerShell）：
 
@@ -721,10 +722,10 @@ curl -s http://127.0.0.1:8001/api/rag/answer \
 **已具备**
 
 - 理赔、投资、通用问答三条链路可运行，前端工作台支持对话、附件上传和链路可视化；
-- 意图路由已接入 `/api/assistant/stream`：JEV / LLM / Hybrid / Shadow 可切换，默认影子模式；
+- 意图路由已接入 `/api/assistant/stream`：JEV / LLM / Hybrid / Shadow 可切换，代码默认 shadow，当前 `.env` 为 hybrid；
 - BGE-M3 + BGE-Reranker 已启用，正常检索返回 `rerank_fallback=false`；
 - 索引已建成：`investment_wiki` 约 55 个 chunk，`knowledge_general` 约 3 个 chunk；
-- `182 passed, 1 skipped`，覆盖率约 83%；审计哈希链、请求 ID、PII 脱敏和 RAG 诊断字段可用；
+- `188 passed, 1 skipped`，覆盖率约 83%；审计哈希链、请求 ID、PII 脱敏和 RAG 诊断字段可用；
 - 线上 `/ai/` 已通过 nginx Basic Auth 部署，`app` 容器只监听 `127.0.0.1:8001`。
 
 **仍需完善**
