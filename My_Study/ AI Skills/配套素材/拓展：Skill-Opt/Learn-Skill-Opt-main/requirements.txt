@@ -1,0 +1,3 @@
+# 固定到编写教程时核对过的 SkillOpt 源码版本。
+skillopt @ git+https://github.com/microsoft/SkillOpt.git@fa4ca184573e42ec11472959dd57422381418096
+pyyaml>=6.0

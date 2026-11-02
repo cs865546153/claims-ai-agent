@@ -1,0 +1,170 @@
+{
+  "batch_id": "第一份独立材料",
+  "extracted_at": "2026-10-28T08:30:00+08:00",
+  "batch_note": "合成教学样本，虚构机构与人物，不可用于报销",
+  "visits": [
+    {
+      "visit_id": "MC-261008-011",
+      "documents": [
+        {
+          "doc_id": "D001",
+          "file": "01_医疗收费票据.jpg",
+          "doc_type": "invoice",
+          "ocr_quality": "clear",
+          "ocr_confidence": 0.988
+        },
+        {
+          "doc_id": "D002",
+          "file": "02_门诊病历.pdf",
+          "doc_type": "medical_record",
+          "ocr_quality": "clear",
+          "ocr_confidence": 0.997,
+          "note": "图片型PDF，无文本层，渲染为200dpi图片后OCR"
+        },
+        {
+          "doc_id": "D003",
+          "file": "03_费用清单.png",
+          "doc_type": "expense_list",
+          "ocr_quality": "clear",
+          "ocr_confidence": 0.997
+        }
+      ],
+      "fields": {
+        "patient_name": {
+          "value": "林知远",
+          "sources": [
+            { "doc_id": "D001", "raw_value": "林知远", "confidence": 0.99 },
+            { "doc_id": "D002", "raw_value": "林知远", "confidence": 0.99 },
+            { "doc_id": "D003", "raw_value": "林知远", "confidence": 0.99 }
+          ],
+          "status": "consistent"
+        },
+        "patient_id": {
+          "value": "MC-P001",
+          "sources": [
+            { "doc_id": "D001", "raw_value": "MC-P001", "confidence": 0.99 },
+            { "doc_id": "D002", "raw_value": "MC-P001", "confidence": 0.99 },
+            { "doc_id": "D003", "raw_value": "MC-P001", "confidence": 0.99 }
+          ],
+          "status": "consistent"
+        },
+        "hospital": {
+          "value": "明川市仁和教学医院",
+          "sources": [
+            { "doc_id": "D001", "raw_value": "明川市仁和教学医院", "confidence": 0.99 },
+            { "doc_id": "D002", "raw_value": "明川市仁和教学医院", "confidence": 0.99 },
+            { "doc_id": "D003", "raw_value": "明川市仁和教学医院", "confidence": 0.99 }
+          ],
+          "status": "consistent"
+        },
+        "visit_date": {
+          "value": "2026-10-08",
+          "sources": [
+            { "doc_id": "D001", "raw_value": "2026-10-08", "confidence": 0.99 },
+            { "doc_id": "D002", "raw_value": "2026-10-08", "confidence": 0.99 },
+            { "doc_id": "D003", "raw_value": "2026-10-08", "confidence": 0.99 }
+          ],
+          "status": "consistent"
+        },
+        "department": {
+          "value": "综合门诊",
+          "sources": [
+            { "doc_id": "D002", "raw_value": "综合门诊", "confidence": 0.99 }
+          ],
+          "status": "uncertain",
+          "note": "仅病历单一来源"
+        },
+        "diagnosis": {
+          "value": "急性上呼吸道感染",
+          "sources": [
+            { "doc_id": "D002", "raw_value": "初步诊断：急性上呼吸道感染", "confidence": 0.99 }
+          ],
+          "status": "uncertain",
+          "note": "仅病历单一来源，且为'初步诊断'，发票与费用清单均未载诊断"
+        },
+        "total_amount": {
+          "value": 241.40,
+          "unit": "CNY",
+          "sources": [
+            { "doc_id": "D001", "raw_value": "医疗费用合计（元）：241.40", "confidence": 0.99 },
+            { "doc_id": "D003", "raw_value": "全单医疗总费用（元）：241.40", "confidence": 0.99 }
+          ],
+          "status": "consistent"
+        },
+        "insurance_paid": {
+          "value": 160.00,
+          "unit": "CNY",
+          "sources": [
+            { "doc_id": "D001", "raw_value": "医保基金支付（元）：160.00", "confidence": 0.99 }
+          ],
+          "status": "uncertain",
+          "note": "仅发票单一来源"
+        },
+        "personal_paid": {
+          "value": 81.40,
+          "unit": "CNY",
+          "sources": [
+            { "doc_id": "D001", "raw_value": "个人支付（元）：81.40", "confidence": 0.99 }
+          ],
+          "status": "uncertain",
+          "note": "仅发票单一来源；160.00 + 81.40 = 241.40，与合计自洽"
+        }
+      },
+      "amount_breakdown": {
+        "invoice_by_category": [
+          { "seq": 1, "category": "诊察费", "amount": 25.00 },
+          { "seq": 2, "category": "检验费", "amount": 80.00 },
+          { "seq": 3, "category": "药品费", "amount": 136.40 }
+        ],
+        "expense_list_items": [
+          { "seq": 1, "item": "普通门诊诊查", "unit": "项", "quantity": 1, "unit_price": 25.00, "amount": 25.00, "mapped_category": "诊察费" },
+          { "seq": 2, "item": "血常规检测", "unit": "项", "quantity": 1, "unit_price": 60.00, "amount": 60.00, "mapped_category": "检验费" },
+          { "seq": 3, "item": "C反应蛋白检测", "unit": "项", "quantity": 1, "unit_price": 20.00, "amount": 20.00, "mapped_category": "检验费" },
+          { "seq": 4, "item": "口服药品组合（教学）", "unit": "项", "quantity": 1, "unit_price": 136.40, "amount": 136.40, "mapped_category": "药品费" }
+        ],
+        "cross_check": [
+          { "category": "诊察费", "invoice_amount": 25.00, "list_amount": 25.00, "match": true },
+          { "category": "检验费", "invoice_amount": 80.00, "list_amount": 80.00, "match": true, "note": "60.00 + 20.00" },
+          { "category": "药品费", "invoice_amount": 136.40, "list_amount": 136.40, "match": true }
+        ]
+      },
+      "consistency_check": {
+        "name_consistent": true,
+        "amount_consistent": true,
+        "amount_diff": 0,
+        "visit_id_consistent": true,
+        "date_consistent": true,
+        "details": "三份材料姓名（林知远）、就诊号（MC-261008-011）、就诊日期（2026-10-08）完全一致；发票合计241.40元与费用清单全单总费用241.40元一致，且按费用类别逐项核对（诊察费/检验费/药品费）均匹配。"
+      }
+    }
+  ],
+  "manual_review": [
+    {
+      "review_id": "R001",
+      "visit_id": "MC-261008-011",
+      "field": "diagnosis",
+      "issue_type": "single_source",
+      "description": "诊断'急性上呼吸道感染'仅来自病历，且标注为'初步诊断'；发票与费用清单未载诊断信息，无法交叉验证。",
+      "suggestion": "人工确认初步诊断是否为最终诊断；如理赔需要确诊依据，建议补充检查报告。",
+      "resolved": false
+    },
+    {
+      "review_id": "R002",
+      "visit_id": "MC-261008-011",
+      "field": "insurance_paid / personal_paid",
+      "issue_type": "single_source",
+      "description": "医保基金支付160.00元、个人支付81.40元仅见于发票，费用清单未体现支付结构。",
+      "suggestion": "两者之和与发票合计自洽（241.40元），可采信；如需理赔计算免赔/自付比例，以发票为准。",
+      "resolved": false
+    },
+    {
+      "review_id": "R003",
+      "visit_id": "MC-261008-011",
+      "field": "document_validity",
+      "issue_type": "suspicious",
+      "description": "三份材料均带有'合成教学样本/虚构机构与人物/不可用于报销'及'教学样本 无效印记'水印。",
+      "suggestion": "确认为教学演示用途，不得作为真实理赔凭证处理。",
+      "resolved": false
+    }
+  ]
+}

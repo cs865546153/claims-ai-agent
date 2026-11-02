@@ -1,0 +1,43 @@
+# 可共享的实验配置；demo.py configure 会生成包含实际模型 ID 的本地配置。
+model:
+  backend: openai_compatible
+  optimizer_backend: openai_compatible
+  target_backend: openai_compatible
+  optimizer: YOUR_MODEL_ID
+  target: YOUR_MODEL_ID
+  reasoning_effort: ''
+train:
+  num_epochs: 1
+  train_size: 8
+  batch_size: 4
+  accumulation: 1
+  seed: 42
+gradient:
+  minibatch_size: 4
+  merge_batch_size: 4
+  analyst_workers: 1
+  failure_only: false
+optimizer:
+  learning_rate: 2
+  min_learning_rate: 2
+  lr_scheduler: constant
+  lr_control_mode: fixed
+  skill_update_mode: patch
+  use_slow_update: false
+  use_meta_skill: false
+evaluation:
+  use_gate: true
+  gate_metric: hard
+  sel_env_num: 4
+  test_env_num: 0
+  eval_test: false
+env:
+  name: searchqa
+  skill_init: skills/product_qa/initial_skill.md
+  split_mode: split_dir
+  split_dir: data/product_qa
+  workers: 1
+  max_turns: 1
+  max_completion_tokens: 2048
+  exec_timeout: 120
+  limit: 0

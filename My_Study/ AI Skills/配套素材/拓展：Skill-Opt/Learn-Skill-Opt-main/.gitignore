@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+configs/*.local.yaml
+outputs/
+.DS_Store
